@@ -1,0 +1,33 @@
+name: bench-ci
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bench-ci-${{ github.event.pull_request.number || github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  bench-check:
+    name: bench-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Default persist-credentials, as upstream: removing auth runs `git submodule
+          # foreach`, which fails on the tree's gitlinks that have no .gitmodules entry.
+          # Same sparse pattern as upstream t3code CI: reference repos (with gitlinks
+          # that have no .gitmodules entry) and vendored iOS archives are not needed.
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - run: bash .bench/ci.sh
