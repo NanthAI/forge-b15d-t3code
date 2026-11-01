@@ -14,6 +14,7 @@ import { VcsProcessSpawnError } from "@t3tools/contracts";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as ForgejoPullRequestProvider from "./ForgejoPullRequestProvider.ts";
 import * as ForgejoSourceControlProvider from "./ForgejoSourceControlProvider.ts";
@@ -1294,6 +1295,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
 
 it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
   const commands: string[] = [];
+  let lastGitCwd = "";
   const requests: string[] = [];
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
@@ -1392,6 +1394,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
         process: {
           run: (input) => {
             commands.push(input.command);
+            if (input.command === "git") lastGitCwd = input.cwd;
             if (input.command === "git")
               return Effect.succeed(
                 input.cwd === "/no-remotes"
@@ -1403,9 +1406,10 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.cwd, HostProcess.HomeDirectory.defaultValue());
             assert.deepStrictEqual(input.args, [
               "--host",
-              input.cwd === "/no-remotes"
+              lastGitCwd === "/no-remotes"
                 ? "https://forgejo.local:3000"
                 : "http://forgejo.local:3000",
               "whoami",
@@ -1421,6 +1425,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
 it.effect("loads later fj review pages when the server caps pages below the requested size", () => {
   const pages: number[] = [];
   let issueCommentRequests = 0;
+  const home = HostProcess.HomeDirectory.defaultValue();
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
     const provider = yield* ForgejoPullRequestProvider.make.pipe(
@@ -1518,6 +1523,7 @@ it.effect("loads later fj review pages when the server caps pages below the requ
               );
             }
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.cwd, home);
             assert.deepStrictEqual(input.args, ["--host", "https://forgejo.test", "whoami"]);
             return Effect.succeed(processOutput(""));
           },
@@ -1608,6 +1614,7 @@ it.effect(
     Effect.gen(function* () {
       for (const scenario of ["authenticated", "revoked", "missing", "invalid-storage"] as const) {
         const commands: string[] = [];
+        const home = yield* HostProcess.HomeDirectory;
         yield* Effect.gen(function* () {
           const spec = yield* ForgejoSourceControlProvider.makeDiscovery;
           assert.strictEqual(spec.type, "managed-cli");
@@ -1680,6 +1687,7 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.strictEqual(input.cwd, home);
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
