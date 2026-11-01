@@ -821,6 +821,11 @@ const make = Effect.gen(function* () {
       tab.loading = false;
       void reportLoaded(tab);
     });
+    if (desktop)
+      void page
+        .waitForLoadState("load")
+        .then(() => reportLoaded(tab))
+        .catch(constVoid);
     page.on("framenavigated", (frame) => {
       const open = tab.fileChooser;
       if (open) {
