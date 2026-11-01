@@ -62,6 +62,9 @@ const BETTER_ROUTE_CHECK_INTERVAL = "60 seconds";
 // A better route that answered the check but then failed to connect is not
 // tried again for this long, so a flaky LAN cannot bounce the connection.
 const BETTER_ROUTE_COOLDOWN_MS = 300_000;
+// A better route that stays silent is probed less and less often, so a
+// permanently dead route does not cost a timed-out probe every minute.
+const BETTER_ROUTE_BACKOFF_MINUTES = [2, 4, 8, 16, 30] as const;
 
 interface SupervisorIntent {
   readonly desired: boolean;
@@ -288,6 +291,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   const currentRoutes = Ref.get(currentEntry).pipe(Effect.map(connectionRoutes));
   const preferredRouteId = yield* Ref.make(Option.none<string>());
   const routeCooldowns = yield* Ref.make<ReadonlyMap<string, bigint>>(new Map());
+  const routeProbeBackoffs = yield* Ref.make<
+    ReadonlyMap<string, { readonly failures: number; readonly until: bigint }>
+  >(new Map());
 
   const attemptEntry = Effect.gen(function* () {
     const latest = yield* Ref.get(currentEntry);
@@ -338,14 +344,34 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     if (current <= 0) return;
     const now = yield* Clock.monotonicTimeNanos;
     const cooldowns = yield* Ref.get(routeCooldowns);
+    const backoffs = yield* Ref.get(routeProbeBackoffs);
     const better = connectionRoutes(latest)
       .slice(0, current)
-      .filter((route) => (cooldowns.get(connectionRouteId(route.target)) ?? 0n) <= now);
+      .filter((route) => (cooldowns.get(connectionRouteId(route.target)) ?? 0n) <= now)
+      .filter((route) => (backoffs.get(connectionRouteId(route.target))?.until ?? 0n) <= now);
     const passed = yield* Effect.forEach(
       better,
       (route: ConnectionRoute) => driver.preflight(latest, route),
       { concurrency: "unbounded" },
     );
+    const checkedAt = yield* Clock.monotonicTimeNanos;
+    yield* Ref.update(routeProbeBackoffs, (current) => {
+      const next = new Map(current);
+      better.forEach((route, i) => {
+        const id = connectionRouteId(route.target);
+        if (passed[i]) {
+          next.delete(id);
+          return;
+        }
+        const failures = (current.get(id)?.failures ?? 0) + 1;
+        const minutes =
+          BETTER_ROUTE_BACKOFF_MINUTES[
+            Math.min(failures, BETTER_ROUTE_BACKOFF_MINUTES.length) - 1
+          ]!;
+        next.set(id, { failures, until: checkedAt + BigInt(minutes) * 60_000_000_000n });
+      });
+      return next;
+    });
     const index = passed.indexOf(true);
     if (index === -1) return;
     const live = yield* SubscriptionRef.get(session);
@@ -684,6 +710,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         (next._tag === "NetworkChanged" && next.network !== "offline") ||
         (next._tag === "Wakeup" && ConnectionWakeups.resetsRetryBackoff(next.reason))
       ) {
+        yield* Ref.set(routeProbeBackoffs, new Map());
         yield* requestBetterRouteCheck(lease);
       }
       const probeTimeout = probeTimeoutFor(next, routeKind);

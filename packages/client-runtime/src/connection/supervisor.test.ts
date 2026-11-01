@@ -1614,6 +1614,48 @@ describe("EnvironmentSupervisor routes", () => {
     }),
   );
 
+  it.effect("backs off checks of a dead LAN route and resets on a network change", () =>
+    Effect.gen(function* () {
+      const lanReachable = yield* Ref.make(false);
+      const checks = yield* Ref.make(0);
+      const harness = yield* makeHarness({
+        checkRoute: (route) =>
+          route.target._tag === "BearerConnectionTarget"
+            ? Ref.update(checks, (count) => count + 1).pipe(
+                Effect.andThen(Ref.get(lanReachable)),
+                Effect.map((reachable) => (reachable ? "answered" : "silent")),
+              )
+            : Effect.succeed("unchecked"),
+        prepare: (_attempt, target) => Effect.succeed(preparedFor(target)),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(LAN_THEN_RELAY_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 1,
+      );
+      const baseline = yield* Ref.get(checks);
+      for (let minute = 0; minute < 10; minute++) {
+        yield* TestClock.adjust("1 minute");
+      }
+      // Checks at 1, 3 and 7 minutes; every-minute checks would make 10.
+      expect((yield* Ref.get(checks)) - baseline).toBe(3);
+
+      yield* Ref.set(lanReachable, true);
+      yield* harness.setNetworkStatus("unknown");
+      yield* harness.setNetworkStatus("online");
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 2,
+      );
+      expect(Option.getOrThrow(yield* SubscriptionRef.get(supervisor.prepared)).target._tag).toBe(
+        "BearerConnectionTarget",
+      );
+    }),
+  );
+
   it.effect("moves off a dead LAN socket when the phone switches to cellular", () =>
     Effect.gen(function* () {
       const lanReachable = yield* Ref.make(true);
