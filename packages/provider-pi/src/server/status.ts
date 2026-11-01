@@ -233,7 +233,7 @@ const runPiVersionCommand = Effect.fn("PiProviderStatus.runPiVersionCommand")(fu
   );
 });
 
-const decodeUnknownJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString);
+const decodeUnknownJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 
 const hasRuntimeApiKey = (launchArgs: ReadonlyArray<string>) =>
   launchArgs.some((arg) => arg === "--api-key" || arg.startsWith("--api-key="));
