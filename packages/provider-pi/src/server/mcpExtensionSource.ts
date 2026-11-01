@@ -333,9 +333,31 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     }
   });
 
+  // RPC mode has no trust prompt, so Pi silently skips an untrusted folder's
+  // project resources. Check per session: trust resolves once per process and
+  // replaced sessions never see Pi's project_trust event again.
+  let trustChecked = false;
+  const noticeUntrustedProject = (ctx: ExtensionContext) => {
+    if (trustChecked) return;
+    trustChecked = true;
+    const argv: ReadonlyArray<string> = Array.isArray(process.argv) ? process.argv : [];
+    if (argv.includes("--no-approve") || argv.includes("-na")) return;
+    if (typeof ctx.isProjectTrusted !== "function" || ctx.isProjectTrusted()) return;
+    ctx.ui.notify(
+      \`Pi does not trust \${ctx.cwd}, so it skipped this project's .pi settings, extensions, skills, prompts, MCP servers and system prompt files. \` +
+        "To use them, run /trust in terminal Pi for this folder or its parent. " +
+        "Pi's --approve flag trusts every project; --no-approve keeps project files off without this notice.",
+      "warning",
+    );
+  };
+
   const endpoint = env(URL_ENV);
   const token = env(TOKEN_ENV);
   if (endpoint === undefined || token === undefined) {
+    pi.on("before_agent_start", (_event, ctx) => {
+      noticeUntrustedProject(ctx);
+      return undefined;
+    });
     pi.on("session_start", async (_event, ctx) => {
       ctx.ui.notify(
         "t3-code MCP unavailable: T3_MCP_URL or T3_MCP_BEARER_TOKEN is missing.",
@@ -450,6 +472,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
 
   // Keep guidance in the system prompt so leading slash commands still expand.
   pi.on("before_agent_start", (event, ctx) => {
+    noticeUntrustedProject(ctx);
     reconcileDiscovery(ctx);
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
