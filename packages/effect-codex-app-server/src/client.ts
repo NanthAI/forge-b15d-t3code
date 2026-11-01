@@ -5,7 +5,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
-import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as CodexRpc from "./_generated/meta.gen.ts";
@@ -18,7 +17,7 @@ import {
   encodeOptionalPayload,
   runHandler,
 } from "./_internal/shared.ts";
-import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+import { captureStderr, makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -287,6 +286,6 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  const stderr = yield* captureStderr(handle.stderr);
+  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle, stderr));
 });
