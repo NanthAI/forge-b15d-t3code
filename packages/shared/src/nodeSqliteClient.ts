@@ -446,7 +446,7 @@ const makeReader = Effect.fnUntraced(function* (options: SqliteClientConfig) {
       }).pipe(Effect.as(undefined));
     });
 
-  return Effect.suspend((): Effect.Effect<Connection | undefined> => {
+  const acquire = Effect.suspend((): Effect.Effect<Connection | undefined> => {
     // @effect-diagnostics-next-line effectSucceedWithVoid:off - The connection result distinguishes undefined from void.
     if (unavailable) return Effect.succeed(undefined);
     let reader: NonNullable<typeof current>;
@@ -480,7 +480,10 @@ const makeReader = Effect.fnUntraced(function* (options: SqliteClientConfig) {
               ),
     );
   });
+  return { acquire, isAvailable: () => !unavailable };
 });
+
+const READER_POOL_SIZE = 4;
 
 const CHECKPOINT_FRAMES = 1000;
 const CHECKPOINT_IDLE_MS = 100;
@@ -1073,21 +1076,73 @@ const make = Effect.fn("makeWithDatabase")(function* (
 
   const semaphore = yield* Semaphore.make(1);
   const connection = yield* makeConnection;
-  const acquireReader =
-    options.readerWorker && isFileDatabase ? yield* makeReader(options) : undefined;
-  const readerSemaphore = yield* Semaphore.make(1);
+  // Slots start their worker on first claim, so idle slots cost nothing.
+  const readerSlots: Array<{
+    readonly reader: {
+      readonly acquire: Effect.Effect<Connection | undefined>;
+      readonly isAvailable: () => boolean;
+    };
+    readonly lock: Semaphore.Semaphore;
+    claims: number;
+  }> = [];
+  if (options.readerWorker && isFileDatabase) {
+    for (let index = 0; index < READER_POOL_SIZE; index++) {
+      readerSlots.push({
+        reader: yield* makeReader(options),
+        lock: yield* Semaphore.make(1),
+        claims: 0,
+      });
+    }
+  }
 
-  const writer = { name: "writer" as const, lock: semaphore, connection };
+  const writer = {
+    name: "writer" as const,
+    lock: semaphore,
+    connection,
+    release: () => {},
+  };
   let activeWriter: ConnectionOwner | undefined;
-  const route = Effect.withFiber((fiber) =>
-    acquireReader !== undefined && Context.get(fiber.context, ReadOnly)
-      ? Effect.map(acquireReader, (readerConnection) =>
-          readerConnection === undefined
-            ? writer
-            : { name: "reader" as const, lock: readerSemaphore, connection: readerConnection },
-        )
-      : Effect.succeed(writer),
-  );
+  const route = Effect.withFiber((fiber) => {
+    if (readerSlots.length === 0 || !Context.get(fiber.context, ReadOnly)) {
+      return Effect.succeed(writer);
+    }
+    return Effect.suspend(() => {
+      let slot: (typeof readerSlots)[number] | undefined;
+      let reader: { readonly acquire: Effect.Effect<Connection | undefined> } | undefined;
+      for (const candidate of readerSlots) {
+        // A reader that cannot open the database retires the whole pool, as the single reader did.
+        if (readerSlots.some((other) => !other.reader.isAvailable())) return Effect.succeed(writer);
+        if (slot === undefined || candidate.claims < slot.claims) {
+          slot = candidate;
+          reader = candidate.reader;
+        }
+      }
+      if (slot === undefined || reader === undefined) return Effect.succeed(writer);
+      const claimed = slot;
+      claimed.claims++;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        claimed.claims--;
+      };
+      return Effect.map(
+        Effect.onInterrupt(reader.acquire, () => Effect.sync(release)),
+        (readerConnection) => {
+          if (readerConnection === undefined) {
+            release();
+            return writer;
+          }
+          return {
+            name: "reader" as const,
+            lock: claimed.lock,
+            connection: readerConnection,
+            release,
+          };
+        },
+      );
+    });
+  });
 
   const acquired = (
     target: { readonly name: Acquired["connection"] },
@@ -1126,7 +1181,10 @@ const make = Effect.fn("makeWithDatabase")(function* (
               )
             : useConnection;
         if (!options.checkpointWorker || target.name !== "writer") {
-          return target.lock.withPermits(1)(useOwnedConnection);
+          return Effect.ensuring(
+            target.lock.withPermits(1)(useOwnedConnection),
+            Effect.sync(target.release),
+          );
         }
         const writerUse = Effect.onExit(useOwnedConnection, (exit) =>
           Effect.sync(() => {
@@ -1164,19 +1222,27 @@ const make = Effect.fn("makeWithDatabase")(function* (
       const pending = fiber.getRef(TransactionAcquire);
       const ownerAtWaitStart = target.name === "writer" ? activeWriter : undefined;
       const owner = target.name === "writer" ? connectionOwner(fiber) : undefined;
-      const acquire = Effect.tap((pending?.restore ?? restore)(target.lock.take(1)), () => {
-        if (target.name === "writer") activeWriter = owner;
-        if (pending !== undefined) {
-          pending.acquired = acquired(target, clock, start);
-          pending.ownerAtWaitStart = ownerAtWaitStart;
-        }
-        return Scope.addFinalizer(
-          scope,
-          Effect.sync(() => {
-            if (target.name === "writer" && activeWriter === owner) activeWriter = undefined;
-          }).pipe(Effect.andThen(target.lock.release(1))),
-        );
-      });
+      const acquire = Effect.tap(
+        Effect.onError((pending?.restore ?? restore)(target.lock.take(1)), () =>
+          Effect.sync(target.release),
+        ),
+        () => {
+          if (target.name === "writer") activeWriter = owner;
+          if (pending !== undefined) {
+            pending.acquired = acquired(target, clock, start);
+            pending.ownerAtWaitStart = ownerAtWaitStart;
+          }
+          return Scope.addFinalizer(
+            scope,
+            Effect.sync(() => {
+              if (target.name === "writer" && activeWriter === owner) activeWriter = undefined;
+            }).pipe(
+              Effect.andThen(target.lock.release(1)),
+              Effect.ensuring(Effect.sync(target.release)),
+            ),
+          );
+        },
+      );
       return Effect.as(
         // A scheduler yield after taking the permit must not precede its release finalizer.
         Effect.provideService(acquire, Scheduler.PreventSchedulerYield, true),
