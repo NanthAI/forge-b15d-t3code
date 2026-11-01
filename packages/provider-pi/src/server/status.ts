@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -232,6 +233,8 @@ const runPiVersionCommand = Effect.fn("PiProviderStatus.runPiVersionCommand")(fu
   );
 });
 
+const decodeUnknownJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString);
+
 const hasRuntimeApiKey = (launchArgs: ReadonlyArray<string>) =>
   launchArgs.some((arg) => arg === "--api-key" || arg.startsWith("--api-key="));
 
@@ -263,12 +266,9 @@ const checkPiProviderAuth = Effect.fn("PiProviderStatus.checkPiProviderAuth")(fu
     );
   }).pipe(Effect.timeoutOption(AUTH_CHECK_TIMEOUT_MS), Effect.option);
   if (Option.isNone(output) || Option.isNone(output.value)) return "unknown" as const;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(output.value.value.stdout);
-  } catch {
-    return "unknown" as const;
-  }
+  const decoded = decodeUnknownJson(output.value.value.stdout);
+  if (Option.isNone(decoded)) return "unknown" as const;
+  const parsed = decoded.value;
   const markers = ["status", "reason", "error", "code"].map((key) => recordField(parsed, key));
   if (markers.some((value) => value === "provider_not_found")) return "provider_not_found";
   if (
