@@ -25,7 +25,10 @@ type InputHook = (
   ctx: { ui: { notify: (message: string, level: string) => void } },
 ) => Promise<{ action: string; text: string; images?: ReadonlyArray<unknown> } | undefined>;
 
-async function loadHooks(commands: ReadonlyArray<SkillCommand> = []) {
+async function loadHooks(
+  commands: ReadonlyArray<SkillCommand> = [],
+  argv: ReadonlyArray<string> = [],
+) {
   const handlers = new Map<string, unknown>();
   const source = NodeModule.stripTypeScriptTypes(
     PI_T3_MCP_EXTENSION_SOURCE.replace(/^import .*;$/gm, "").replace(
@@ -34,7 +37,7 @@ async function loadHooks(commands: ReadonlyArray<SkillCommand> = []) {
     ),
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
-    process: { env: {} },
+    process: { env: {}, argv },
     NodeFSP,
     NodePath,
     stripFrontmatter: (content: string) => content,
@@ -518,5 +521,41 @@ describe("Pi skill references", () => {
     } finally {
       await NodeFSP.rm(directory, { recursive: true });
     }
+  });
+});
+
+describe("Pi project trust", () => {
+  const runSessions = async (trusted: boolean, argv: ReadonlyArray<string>) => {
+    const notices: string[] = [];
+    const ctx = {
+      cwd: "/work/project",
+      isProjectTrusted: () => trusted,
+      ui: { notify: (message: string) => notices.push(message) },
+    };
+    for (let session = 0; session < 2; session++) {
+      const hook = (await loadHooks([], argv)).get("before_agent_start") as (
+        event: unknown,
+        ctx: unknown,
+      ) => unknown;
+      for (let turn = 0; turn < 2; turn++) await hook({ systemPrompt: "base" }, ctx);
+    }
+    return notices;
+  };
+
+  it("stays quiet for a trusted folder", async () => {
+    assert.deepEqual(await runSessions(true, []), []);
+  });
+
+  it("posts one notice per session for an untrusted folder", async () => {
+    const notices = await runSessions(false, []);
+    assert.equal(notices.length, 2);
+    assert.include(notices[0]!, "/work/project");
+    assert.include(notices[0]!, "/trust");
+    assert.include(notices[0]!, "--approve");
+    assert.include(notices[0]!, "--no-approve");
+  });
+
+  it("stays quiet with --approve -na", async () => {
+    assert.deepEqual(await runSessions(false, ["--approve", "-na"]), []);
   });
 });

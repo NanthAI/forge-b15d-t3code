@@ -79,6 +79,10 @@ threads.
 - If no models appear, open Pi directly and confirm its authentication and model configuration.
 - If discovery cannot complete, T3 Code keeps Pi available with the `Pi default` model. Start a
   thread to let the interactive Pi session handle any startup prompt.
+- If T3 Code shows a notice that Pi does not trust the project folder, Pi skipped that folder's
+  `.pi` settings, extensions, skills, prompts, MCP servers and system prompt files. Run `/trust` in
+  terminal Pi for the folder or its parent, then start a fresh provider session. `--approve` trusts
+  every project; `--no-approve` keeps project files off without the notice.
 - If a project extension is missing, approve the project in Pi, then start a fresh provider session.
 - If a project skill is missing from the `$` menu, approve the project in Pi and refresh the provider.
 - The context meter appears once Pi reports usage for the thread. Some model providers only
