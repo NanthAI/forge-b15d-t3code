@@ -119,6 +119,16 @@ describe("workspace file previews", () => {
   });
 });
 
+describe("MPEG transport stream MIME types", () => {
+  it.each(["video/mp2t", "video/vnd.dlna.mpeg-tts"])(
+    "classifies clamp.ts as text for %s",
+    (mimeType) => {
+      expect(filePreviewKind({ name: "clamp.ts", mimeType })).toBe("text");
+      expect(filePreviewKind({ name: "clip.mp4", mimeType })).toBe("video");
+    },
+  );
+});
+
 describe("media path parsing", () => {
   // regression: #9023 media kind comes from the decoded pathname, ignoring query and hash
   it.each([

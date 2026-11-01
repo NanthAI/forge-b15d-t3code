@@ -14,4 +14,12 @@ describe("videoMimeType", () => {
       "video/webm",
     );
   });
+
+  it.each(["video/mp2t", "video/vnd.dlna.mpeg-tts"])(
+    "treats %s as generic so TypeScript files are not videos",
+    (mimeType) => {
+      expect(videoMimeType({ name: "clamp.ts", mimeType })).toBeNull();
+      expect(videoMimeType({ name: "clip.mp4", mimeType })).toBe("video/mp4");
+    },
+  );
 });

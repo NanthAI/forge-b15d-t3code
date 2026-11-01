@@ -10,6 +10,9 @@ const VIDEO_MIME_TYPE_BY_EXTENSION = new Map([
   ["webm", "video/webm"],
 ]);
 
+// Operating systems report these for `.ts` source files; browsers can't play them.
+export const MPEG_TRANSPORT_STREAM_MIME_TYPES = new Set(["video/mp2t", "video/vnd.dlna.mpeg-tts"]);
+
 export const VIDEO_FILE_EXTENSIONS = Object.freeze([...VIDEO_MIME_TYPE_BY_EXTENSION.keys()]);
 
 export function videoMimeType(attachment: {
@@ -17,8 +20,10 @@ export function videoMimeType(attachment: {
   readonly mimeType: string;
 }): string | null {
   const mimeType = attachment.mimeType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-  if (mimeType.startsWith("video/")) return mimeType;
-  if (mimeType !== "" && !GENERIC_MIME_TYPES.has(mimeType)) return null;
+  const generic =
+    GENERIC_MIME_TYPES.has(mimeType) || MPEG_TRANSPORT_STREAM_MIME_TYPES.has(mimeType);
+  if (mimeType.startsWith("video/") && !generic) return mimeType;
+  if (mimeType !== "" && !generic) return null;
   const dotIndex = attachment.name.lastIndexOf(".");
   return dotIndex < 0
     ? null
