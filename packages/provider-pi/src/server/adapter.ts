@@ -1212,6 +1212,38 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
+      const emitSystemNotice = Effect.fnUntraced(function* (turn: ActivePiTurn, message: string) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            completedAt: emittedAt,
+            title: message,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      // Older Pi starts a queued message as soon as abort lands and saves it to the session.
+      const clearPiQueue = Effect.fnUntraced(function* (turn: ActivePiTurn, timeoutMs?: number) {
+        const cleared = yield* request({ type: "clear_queue" }, timeoutMs).pipe(
+          Effect.map((response) => piQueuedTexts(response)),
+          Effect.catchCause(() => Effect.succeed(null)),
+        );
+        if (cleared === null || cleared.count === 0) return;
+        const listed = cleared.texts.map((text) => `- ${text}`).join("\n");
+        yield* emitSystemNotice(
+          turn,
+          `Stop cleared ${cleared.count} queued ${cleared.count === 1 ? "message" : "messages"} Pi had not read yet.${listed.length > 0 ? `\n${listed}` : ""}`,
+        );
+      });
+
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
@@ -1221,21 +1253,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
           if (turn === null || message.length === 0) return;
-          const emittedAt = yield* DateTime.now;
-          const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
-          yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
-          yield* emit({
-            type: "turn_item.updated",
-            driver: PI_PROVIDER,
-            turnItem: {
-              ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
-              status: "completed",
-              completedAt: emittedAt,
-              title: message,
-              type: "system_notice",
-              message,
-            },
-          });
+          yield* emitSystemNotice(turn, message);
           return;
         }
         if (
@@ -2641,6 +2659,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               // Generic abort misses manual compaction; terminate so Stop covers /compact and recovery.
               stopRequested = true;
               if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
+                yield* clearPiQueue(turn, 2_000);
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
               // Read rollback tree refs before termination breaks requests; the permit lets in-flight capture finish.
@@ -2654,6 +2673,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               );
               return;
             }
+            yield* clearPiQueue(turn);
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
@@ -3068,6 +3088,17 @@ interface PiSessionEntry {
 interface PiSessionListing {
   readonly entries: ReadonlyMap<string, PiSessionEntry>;
   readonly leafId: string | null;
+}
+
+/** Pi's `clear_queue` reply lists the dropped steer and follow-up texts; image-only ones are blank. */
+function piQueuedTexts(data: unknown): { count: number; texts: ReadonlyArray<string> } {
+  const queued = [recordField(data, "steering"), recordField(data, "followUp")].flatMap((list) =>
+    Array.isArray(list) ? list.filter((text): text is string => typeof text === "string") : [],
+  );
+  return {
+    count: queued.length,
+    texts: queued.map((text) => text.trim()).filter((text) => text.length > 0),
+  };
 }
 
 function piSessionListing(data: unknown): PiSessionListing | null {

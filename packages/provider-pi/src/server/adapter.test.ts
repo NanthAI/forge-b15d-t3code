@@ -163,6 +163,7 @@ interface FakePi {
   readonly deferNextState: () => void;
   readonly resolveDeferredState: (data: unknown) => Effect.Effect<void>;
   readonly failNextState: () => void;
+  readonly setClearQueueReply: (reply: Record<string, unknown>) => void;
   readonly deferNextLifecycle: (type: "switch_session" | "new_session" | "fork") => void;
   readonly deferNextModelSelection: () => void;
   readonly queueModels: (models: ReadonlyArray<unknown>) => void;
@@ -201,6 +202,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
+  let clearQueueReply: Record<string, unknown> = {};
   let vetoSwitch = false;
   let vetoNewSession = false;
   let deferredLifecycle: string | undefined;
@@ -252,6 +254,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
           };
         }
         return base;
+      case "clear_queue":
+        return { ...base, ...clearQueueReply };
       case "get_available_models":
         return { ...base, data: { models } };
       case "new_session": {
@@ -364,6 +368,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       }),
     failNextState: () => {
       failState = true;
+    },
+    setClearQueueReply: (reply) => {
+      clearQueueReply = reply;
     },
     deferNextLifecycle: (type) => {
       deferredLifecycle = type;
@@ -3873,6 +3880,62 @@ describe("PiAdapterV2", () => {
       yield* fake.emit({ type: "agent_settled" });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      name: "lists the cleared messages",
+      reply: {
+        data: { steering: ["change course", "  "], followUp: ["then summarize"] },
+      },
+      notice:
+        "Stop cleared 3 queued messages Pi had not read yet.\n- change course\n- then summarize",
+    },
+    {
+      name: "continues when Pi does not know clear_queue",
+      reply: { success: false, error: "Unknown command: clear_queue" },
+      notice: undefined,
+    },
+  ])("clears Pi's native queue before Stop aborts: $name", ({ reply, notice }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.setClearQueueReply(reply);
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const runningTurn = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      const providerTurnId =
+        runningTurn.type === "provider_turn.updated" ? runningTurn.providerTurn.id : undefined;
+      assert.isDefined(providerTurnId);
+
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
+      yield* fake.takeRequest("abort");
+      const types = fake.allRequests().map((request) => request["type"]);
+      assert.isBelow(types.indexOf("clear_queue"), types.indexOf("abort"));
+      assert.isAbove(types.indexOf("clear_queue"), -1);
+      if (notice !== undefined) {
+        const noticeEvent = yield* takeEvent(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+        );
+        assert.isTrue(
+          noticeEvent.type === "turn_item.updated" &&
+            noticeEvent.turnItem.type === "system_notice" &&
+            noticeEvent.turnItem.message === notice,
+        );
+      }
+      yield* fake.emit({ type: "agent_settled" });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
