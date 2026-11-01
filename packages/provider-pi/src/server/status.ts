@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -56,6 +57,9 @@ const PI_PRESENTATION = {
 } as const;
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
+const AUTH_CHECK_TIMEOUT_MS = 4_000;
+/** `pi auth check` arrived in 0.84.1. */
+const MINIMUM_PI_AUTH_CHECK_VERSION = "0.84.1";
 const PI_RPC_DISCOVERY_TIMEOUT_MS = 30_000;
 /**
  * get_entries arrived in 0.80.3 and agent_settled landed in source at 0.80.4.
@@ -73,6 +77,7 @@ const PI_DEFAULT_MODEL: ServerProviderModel = {
 interface PiDiscovery extends PiDiscoveredCommands {
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly authenticated: boolean;
+  readonly activeModel: { readonly provider: string; readonly id: string } | undefined;
 }
 
 function piModelsFromSettings(
@@ -168,12 +173,19 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
     .request({ type: "get_commands" })
     .pipe(Effect.orElseSucceed(() => undefined));
   const discoveredModels = yield* Effect.fromResult(parseDiscoveredModels(modelsData, stateData));
+  const stateModel = recordField(stateData, "model");
+  const activeProvider = recordString(stateModel, "provider");
+  const activeId = recordString(stateModel, "id");
   const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
   return {
     models: discoveredModels,
     slashCommands: withPiBuiltinSlashCommands(slashCommands),
     skills,
     authenticated: discoveredModels.length > 0,
+    activeModel:
+      activeProvider !== undefined && activeId !== undefined
+        ? { provider: activeProvider, id: activeId }
+        : undefined,
   } satisfies PiDiscovery;
 }, Effect.scoped);
 
@@ -219,6 +231,84 @@ const runPiVersionCommand = Effect.fn("PiProviderStatus.runPiVersionCommand")(fu
       shell: spawnCommand.shell,
     }),
   );
+});
+
+const decodeUnknownJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
+const hasRuntimeApiKey = (launchArgs: ReadonlyArray<string>) =>
+  launchArgs.some((arg) => arg === "--api-key" || arg.startsWith("--api-key="));
+
+const MISSING_AUTH_STATUSES = new Set(["missing", "unauthenticated", "not_configured", "none"]);
+
+/**
+ * Refines Pi's own verdict. `pi auth check` neither refreshes nor prints credentials,
+ * and it cannot see extension providers, so any failure falls back to the generic message.
+ */
+const checkPiProviderAuth = Effect.fn("PiProviderStatus.checkPiProviderAuth")(function* (
+  piSettings: PiSettings,
+  environment: NodeJS.ProcessEnv,
+  providerId: string,
+): Effect.fn.Return<
+  "missing" | "provider_not_found" | "unknown",
+  never,
+  ChildProcessSpawner.ChildProcessSpawner
+> {
+  const command = piSettings.binaryPath || "pi";
+  const args = ["auth", "check", "--provider", providerId, "--json", "--no-refresh"];
+  const output = yield* Effect.gen(function* () {
+    const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
+    return yield* spawnAndCollect(
+      command,
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        env: environment,
+        shell: spawnCommand.shell,
+      }),
+    );
+  }).pipe(Effect.timeoutOption(AUTH_CHECK_TIMEOUT_MS), Effect.option);
+  if (Option.isNone(output) || Option.isNone(output.value)) return "unknown" as const;
+  const decoded = decodeUnknownJson(output.value.value.stdout);
+  if (Option.isNone(decoded)) return "unknown" as const;
+  const parsed = decoded.value;
+  const markers = ["status", "reason", "error", "code"].map((key) => recordField(parsed, key));
+  if (markers.some((value) => value === "provider_not_found")) return "provider_not_found";
+  if (
+    recordField(parsed, "authenticated") === false ||
+    recordField(parsed, "configured") === false ||
+    markers.some((value) => typeof value === "string" && MISSING_AUTH_STATUSES.has(value))
+  ) {
+    return "missing";
+  }
+  return "unknown";
+});
+
+const describeMissingDefaultCredentials = Effect.fn(
+  "PiProviderStatus.describeMissingDefaultCredentials",
+)(function* (
+  piSettings: PiSettings,
+  environment: NodeJS.ProcessEnv,
+  version: string,
+  launchArgs: ReadonlyArray<string>,
+  discovery: PiDiscovery,
+): Effect.fn.Return<string | undefined, never, ChildProcessSpawner.ChildProcessSpawner> {
+  const active = discovery.activeModel;
+  if (active === undefined || discovery.models.length === 0) return undefined;
+  if (discovery.models.some((model) => model.subProvider === active.provider)) return undefined;
+  const label = `${active.provider}/${active.id}`;
+  const generic = `Pi's default model ${label} has no available credentials for ${active.provider}. Check the Pi launch arguments or sign in to ${active.provider} with Pi.`;
+  if (
+    hasRuntimeApiKey(launchArgs) ||
+    compareSemverVersions(version, MINIMUM_PI_AUTH_CHECK_VERSION) < 0
+  ) {
+    return generic;
+  }
+  const verdict = yield* checkPiProviderAuth(piSettings, environment, active.provider);
+  if (verdict === "missing") {
+    return `Pi's default model ${label} has no credentials configured for ${active.provider}. Add credentials with Pi or change the model in the Pi launch arguments.`;
+  }
+  if (verdict === "provider_not_found") {
+    return `Pi's default model ${label} uses provider ${active.provider}, which Pi does not recognize. Check the Pi launch arguments.`;
+  }
+  return generic;
 });
 
 export const buildInitialPiProviderSnapshot = Effect.fn(
@@ -432,6 +522,16 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
 
   const discovery = discoveryExit.value.value;
   const models = piModelsFromSettings(piSettings.customModels, discovery.models);
+  // Stay ready: a warning would hide every Pi model, and non-default models may still work.
+  const defaultModelMessage = discovery.authenticated
+    ? yield* describeMissingDefaultCredentials(
+        piSettings,
+        environment,
+        version,
+        resolvedLaunchArgs.args,
+        discovery,
+      )
+    : undefined;
   return buildServerProvider({
     presentation: PI_PRESENTATION,
     enabled: piSettings.enabled,
@@ -445,7 +545,9 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       status: discovery.authenticated ? "ready" : "warning",
       auth: { status: discovery.authenticated ? "authenticated" : "unauthenticated", type: "pi" },
       ...(discovery.authenticated
-        ? {}
+        ? defaultModelMessage === undefined
+          ? {}
+          : { message: defaultModelMessage }
         : {
             message:
               "Pi has no usable models. Run `pi` in a terminal and use /login, or configure an API key in ~/.pi/agent.",
