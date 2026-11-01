@@ -2034,6 +2034,66 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_code",
+        toolName: "codemode",
+        args: {},
+      });
+      const parentNode = yield* takeEvent(
+        (event) =>
+          event.type === "node.updated" && event.node.nativeItemRef?.nativeId === "call_code",
+      );
+      const parentItem = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.nativeItemRef?.nativeId === "call_code",
+      );
+      if (parentNode.type !== "node.updated" || parentItem.type !== "turn_item.updated")
+        return yield* Effect.die("Expected parent events");
+      for (const type of ["tool_execution_update", "tool_execution_start", "tool_execution_end"]) {
+        yield* fake.emit({
+          type,
+          toolCallId: "call_code/1",
+          parentToolCallId: "call_code",
+          toolName: "read",
+          args: { path: "a.txt" },
+          partialResult: { content: [{ type: "text", text: "x" }] },
+          result: { content: [{ type: "text", text: "x" }] },
+          isError: false,
+        });
+        const node = yield* takeEvent(
+          (event) =>
+            event.type === "node.updated" && event.node.nativeItemRef?.nativeId === "call_code/1",
+        );
+        const item = yield* takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === "call_code/1",
+        );
+        if (node.type !== "node.updated" || item.type !== "turn_item.updated")
+          return yield* Effect.die("Expected nested events");
+        assert.equal(node.node.parentNodeId, parentNode.node.id);
+        assert.equal(node.node.rootNodeId, parentNode.node.rootNodeId);
+        assert.equal(item.turnItem.parentItemId, parentItem.turnItem.id);
+      }
+      assert.equal(parentItem.turnItem.parentItemId, null);
+      assert.equal(parentNode.node.parentNodeId, parentNode.node.rootNodeId);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect(
     "keeps native and MCP images available to the shared asset reader with typed results",
     () =>
