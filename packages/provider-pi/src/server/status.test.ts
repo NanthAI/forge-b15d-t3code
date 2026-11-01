@@ -52,7 +52,15 @@ function piProbeSpawner(version: string) {
   });
 }
 
-const piDiscoverySpawner = (inventory: unknown) =>
+const piDiscoverySpawner = (
+  inventory: unknown,
+  options: {
+    readonly state?: unknown;
+    readonly version?: string;
+    readonly authCheck?: { readonly stdout: string; readonly exitCode?: number };
+    readonly authCalls?: Array<ReadonlyArray<string>>;
+  } = {},
+) =>
   Effect.gen(function* () {
     const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
     let stdinBuffer = "";
@@ -71,7 +79,9 @@ const piDiscoverySpawner = (inventory: unknown) =>
               ? inventory
               : request.type === "get_commands"
                 ? { commands: [] }
-                : {};
+                : request.type === "get_state"
+                  ? (options.state ?? {})
+                  : {};
           yield* Queue.offer(
             stdout,
             encoder.encode(
@@ -83,9 +93,13 @@ const piDiscoverySpawner = (inventory: unknown) =>
     );
     return ChildProcessSpawner.make((command) => {
       const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+      if (args[0] === "auth") {
+        options.authCalls?.push(args);
+        return Effect.succeed(processHandle(options.authCheck ?? { exitCode: 1 }));
+      }
       return Effect.succeed(
         args.includes("--version")
-          ? processHandle({ stdout: "pi 0.84.3\n" })
+          ? processHandle({ stdout: `pi ${options.version ?? "0.84.3"}\n` })
           : ChildProcessSpawner.makeHandle({
               ...processHandle({}),
               exitCode: Effect.never,
@@ -164,4 +178,86 @@ describe("PiProvider", () => {
       assert.equal(snapshot.auth.status, "unknown");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  describe("default model credentials", () => {
+    const state = { model: { provider: "openai", id: "gpt-5" } };
+    const inventory = { models: [{ provider: "anthropic", id: "claude-sonnet-4" }] };
+    const run = (
+      options: Parameters<typeof piDiscoverySpawner>[1],
+      launchArgs = "--model openai/gpt-5",
+      inv: unknown = inventory,
+    ) =>
+      Effect.gen(function* () {
+        const spawner = yield* piDiscoverySpawner(inv, options);
+        return yield* checkPiProviderStatus({ ...settings, launchArgs }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+      }).pipe(Effect.provide(NodeServices.layer));
+
+    it.effect("names the model when auth check reports missing credentials", () =>
+      Effect.gen(function* () {
+        const authCalls: Array<ReadonlyArray<string>> = [];
+        const snapshot = yield* run({
+          state,
+          authCalls,
+          authCheck: { stdout: JSON.stringify({ provider: "openai", status: "missing" }) },
+        });
+        assert.equal(snapshot.status, "ready");
+        assert.equal(snapshot.auth.status, "authenticated");
+        assert.include(snapshot.message ?? "", "openai/gpt-5");
+        assert.include(snapshot.message ?? "", "has no credentials configured for openai");
+        assert.deepEqual(authCalls, [
+          ["auth", "check", "--provider", "openai", "--json", "--no-refresh"],
+        ]);
+      }),
+    );
+
+    it.effect("skips auth check with a runtime --api-key", () =>
+      Effect.gen(function* () {
+        const authCalls: Array<ReadonlyArray<string>> = [];
+        const snapshot = yield* run({ state, authCalls }, "--model openai/gpt-5 --api-key x");
+        assert.equal(snapshot.status, "ready");
+        assert.include(snapshot.message ?? "", "openai/gpt-5");
+        assert.deepEqual(authCalls, []);
+      }),
+    );
+
+    it.effect("reports provider_not_found distinctly", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* run({
+          state,
+          authCheck: { stdout: JSON.stringify({ error: "provider_not_found" }), exitCode: 1 },
+        });
+        assert.include(snapshot.message ?? "", "does not recognize");
+      }),
+    );
+
+    it.effect("falls back to a generic message on malformed auth check output", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* run({ state, authCheck: { stdout: "not json" } });
+        assert.equal(snapshot.status, "ready");
+        assert.include(snapshot.message ?? "", "launch arguments");
+      }),
+    );
+
+    it.effect("gives a generic message without running auth check on Pi older than 0.84.1", () =>
+      Effect.gen(function* () {
+        const authCalls: Array<ReadonlyArray<string>> = [];
+        const snapshot = yield* run({ state, authCalls, version: "0.84.0" });
+        assert.include(snapshot.message ?? "", "launch arguments");
+        assert.deepEqual(authCalls, []);
+      }),
+    );
+
+    it.effect("stays silent when the active provider has a listed model", () =>
+      Effect.gen(function* () {
+        const authCalls: Array<ReadonlyArray<string>> = [];
+        const snapshot = yield* run({ state, authCalls }, "--model openai/gpt-99", {
+          models: [{ provider: "openai", id: "gpt-5" }],
+        });
+        assert.equal(snapshot.message, undefined);
+        assert.deepEqual(authCalls, []);
+      }),
+    );
+  });
 });
