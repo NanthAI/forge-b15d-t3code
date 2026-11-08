@@ -119,7 +119,7 @@ export const makeTerminationError = (
         }),
       ),
     onSuccess: (code) =>
-      (stderrTail ? Effect.map(stderrTail.read, summarizeStderr) : Effect.succeed(undefined)).pipe(
+      (stderrTail ? Effect.map(stderrTail.read, summarizeStderr) : Effect.void).pipe(
         Effect.map(
           (stderr) =>
             new CodexError.CodexAppServerProcessExitedError({
