@@ -2401,6 +2401,54 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_code",
+        toolName: "codemode",
+        args: { code: "run()" },
+      });
+      const parentItem = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.title === "codemode",
+      );
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "call_code/1",
+        parentToolCallId: "call_code",
+        toolName: "read",
+        args: { path: "a.ts" },
+        partialResult: { content: [{ type: "text", text: "x" }] },
+      });
+      const childNode = yield* takeEvent(
+        (event) =>
+          event.type === "node.updated" && event.node.parentNodeId !== event.node.rootNodeId,
+      );
+      const childItem = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.title === "read",
+      );
+      if (
+        parentItem.type !== "turn_item.updated" ||
+        childNode.type !== "node.updated" ||
+        childItem.type !== "turn_item.updated"
+      )
+        return yield* Effect.die("Expected nested tool events");
+      assert.equal(childItem.turnItem.parentItemId, parentItem.turnItem.id);
+      assert.equal(childNode.node.parentNodeId, parentItem.turnItem.nodeId);
+      assert.equal(parentItem.turnItem.parentItemId, null);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("persists edit patches and write content on file change items", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
