@@ -1,15 +1,19 @@
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as Queue from "effect/Queue";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as References from "effect/References";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -153,6 +157,82 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       );
 
       assert.equal(initialized.userAgent, "mock-codex-app-server");
+    }),
+  );
+
+  it.effect("reports the launcher's stderr when the process exits before initialize", () =>
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const script = [
+        "process.stderr.write('file:///x/codex.js:107\\n    throw new Error(msg);\\n    ^\\n\\n');",
+        "process.stderr.write('Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest\\n    at file:///x/codex.js:107:9\\n');",
+        "process.exitCode = 1;",
+      ].join("");
+      const handle = yield* spawner.spawn(ChildProcess.make(process.execPath, ["-e", script]));
+      const scope = yield* Scope.make();
+      const context = yield* Layer.buildWithScope(CodexClient.layerChildProcess(handle), scope);
+
+      const error = yield* Effect.gen(function* () {
+        const client = yield* CodexClient.CodexAppServerClient;
+        return yield* client
+          .request("initialize", {
+            clientInfo: { name: "test", title: "Test", version: "0.0.0" },
+            capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+          })
+          .pipe(Effect.flip);
+      }).pipe(
+        Effect.timeout("5 seconds"),
+        Effect.provide(context),
+        Effect.ensuring(Scope.close(scope, Exit.void)),
+      );
+
+      assert.equal(error._tag, "CodexAppServerProcessExitedError");
+      assert.equal(
+        error.message,
+        "Codex App Server process exited with code 1: Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest",
+      );
+    }),
+  );
+
+  it.effect("warns once about a notification that fails to decode and keeps dispatching", () =>
+    Effect.gen(function* () {
+      const warnings: Array<{ message: unknown; annotations: Record<string, unknown> }> = [];
+      const capture = Logger.make((options) => {
+        if (options.logLevel === "Warn") {
+          warnings.push({
+            message: options.message,
+            annotations: { ...options.fiber.getRef(References.CurrentLogAnnotations) },
+          });
+        }
+      });
+      const sentinel = "SENTINEL-SECRET-TURN-ID";
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const encoder = new TextEncoder();
+      const frame = (params: unknown) =>
+        encoder.encode(`${JSON.stringify({ method: "item/agentMessage/delta", params })}\n`);
+      const received = yield* Queue.unbounded<unknown>();
+
+      yield* Effect.gen(function* () {
+        const client = yield* CodexClient.make(stdio);
+        yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
+          Queue.offer(received, payload),
+        );
+        yield* Queue.offer(input, frame({ threadId: "t", turnId: sentinel, itemId: "i" }));
+        yield* Queue.offer(input, frame({ threadId: "t", turnId: sentinel, itemId: "i" }));
+        yield* Queue.offer(
+          input,
+          frame({ threadId: "t", turnId: "turn", itemId: "i", delta: "hello" }),
+        );
+        const payload = yield* Queue.take(received).pipe(Effect.timeout("5 seconds"));
+        assert.equal((payload as { delta: string }).delta, "hello");
+      }).pipe(Effect.provide(Logger.layer([capture])), Effect.scoped);
+
+      assert.equal(warnings.length, 1);
+      const warning = warnings[0]!;
+      assert.include(JSON.stringify(warning.message), "failed to decode");
+      assert.equal(warning.annotations.method, "item/agentMessage/delta");
+      assert.include(warning.annotations.issueKinds as Array<string>, "MissingKey");
+      assert.notInclude(JSON.stringify(warnings), sentinel);
     }),
   );
 });

@@ -18,7 +18,7 @@ import {
   encodeOptionalPayload,
   runHandler,
 } from "./_internal/shared.ts";
-import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+import { captureStderrTail, makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -104,6 +104,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const termination = yield* Deferred.make<never, CodexError.CodexAppServerError>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
+  const warnedDecodeFailures = new Set<string>();
   let unknownRequestHandler:
     | ((method: string, params: unknown) => Effect.Effect<unknown, CodexError.CodexAppServerError>)
     | undefined;
@@ -166,6 +167,24 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
     if (schema) {
       return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+        Effect.tapErrorTag("CodexAppServerProtocolParseError", (error) => {
+          const key = `${notification.method}:${(error.issueKinds ?? []).join(",")}`;
+          if (warnedDecodeFailures.has(key)) return Effect.void;
+          warnedDecodeFailures.add(key);
+          return Effect.logWarning(
+            "Dropped a Codex App Server notification that failed to decode",
+          ).pipe(
+            Effect.annotateLogs({
+              operation: error.operation,
+              method: notification.method,
+              ...(error.issueCount === undefined ? {} : { issueCount: error.issueCount }),
+              ...(error.issueKinds === undefined ? {} : { issueKinds: error.issueKinds }),
+              ...(error.maximumPathDepth === undefined
+                ? {}
+                : { maximumPathDepth: error.maximumPathDepth }),
+            }),
+          );
+        }),
         Effect.flatMap((decoded) =>
           Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
         ),
@@ -287,6 +306,6 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  const stderrTail = yield* captureStderrTail(handle.stderr);
+  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle, stderrTail));
 });
