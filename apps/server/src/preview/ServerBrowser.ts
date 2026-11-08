@@ -310,6 +310,9 @@ interface ServerTab {
   setting: PreviewViewportSetting;
   colorScheme: PreviewAppearancePreference;
   zoomFactor: number;
+  /** Last good CSS size read from a desktop page, which has no Playwright viewport. */
+  desktopSize: { width: number; height: number } | null;
+  desktopSizeRead: Promise<void> | null;
   loading: boolean;
   closing: boolean;
   recording: Recording | null;
@@ -597,8 +600,9 @@ const make = Effect.gen(function* () {
   };
 
   const layoutSize = (tab: ServerTab) => {
+    if (tab.desktop) return tab.desktopSize ?? tab.page.viewportSize();
     const size = tab.page.viewportSize();
-    if (!size || tab.desktop) return size;
+    if (!size) return size;
     return {
       width: Math.max(1, Math.round(size.width / tab.zoomFactor)),
       height: Math.max(1, Math.round(size.height / tab.zoomFactor)),
@@ -622,7 +626,40 @@ const make = Effect.gen(function* () {
     });
   };
 
+  // Desktop pages have no Playwright viewport, so measure the CSS size. Reads
+  // run one at a time and a failed or hung read keeps the last good size.
+  const refreshDesktopSize = (tab: ServerTab): Promise<void> => {
+    if (tab.desktopSizeRead) return tab.desktopSizeRead;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = Promise.race([
+      tab.page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), 2000);
+      }),
+    ])
+      .then((size) => {
+        if (size && size.width > 0 && size.height > 0) {
+          tab.desktopSize = { width: Math.round(size.width), height: Math.round(size.height) };
+        }
+      })
+      .catch(constVoid)
+      .finally(() => {
+        clearTimeout(timer);
+        if (tab.desktopSizeRead === read) tab.desktopSizeRead = null;
+      });
+    tab.desktopSizeRead = read;
+    return read;
+  };
+
   const broadcastViewport = (tab: ServerTab) => {
+    if (tab.desktop) {
+      void refreshDesktopSize(tab).then(() => {
+        const size = layoutSize(tab);
+        if (!size) return;
+        for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
+      });
+      return;
+    }
     const size = layoutSize(tab);
     if (!size) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
@@ -785,6 +822,8 @@ const make = Effect.gen(function* () {
       setting: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
       colorScheme: "system",
       zoomFactor: 1,
+      desktopSize: null,
+      desktopSizeRead: null,
       loading: false,
       closing: false,
       recording: null,
@@ -817,6 +856,16 @@ const make = Effect.gen(function* () {
       tab.loading = false;
       void reportLoaded(tab);
     });
+    // The desktop navigates its own page; one that loaded before these listeners
+    // attached fired `load` unheard. Resolves at once for an already-loaded page.
+    if (desktop) {
+      void page
+        .waitForLoadState("load")
+        .then(() => {
+          if (!tab.closing) return reportLoaded(tab);
+        })
+        .catch(constVoid);
+    }
     page.on("framenavigated", (frame) => {
       const open = tab.fileChooser;
       if (open) {
@@ -1483,7 +1532,7 @@ const make = Effect.gen(function* () {
       };
     }
     const url = tab.page.url();
-    const viewport = tab.page.viewportSize();
+    const viewport = layoutSize(tab) ?? undefined;
     const status = {
       available: true,
       visible: tab.viewers.size > 0,
@@ -2412,7 +2461,13 @@ const make = Effect.gen(function* () {
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss replaces its backlog. It runs
         // synchronously so an older replacement can never land after a newer one.
-        else if (next._tag === "gone" || next._tag === "control" || next._tag === "fileChooser") {
+        else if (
+          next._tag === "gone" ||
+          next._tag === "reconnect" ||
+          next._tag === "viewport" ||
+          next._tag === "control" ||
+          next._tag === "fileChooser"
+        ) {
           const dropped = Effect.runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
           Queue.offerUnsafe(output, next);
