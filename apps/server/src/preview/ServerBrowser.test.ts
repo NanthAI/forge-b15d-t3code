@@ -1916,3 +1916,31 @@ it.live("failed session and browser launches release capacity, as does closing a
     }),
   ).pipe(Effect.provide(layer)),
 );
+
+it.live("a desktop tab without a Playwright viewport sends the measured page size to viewers", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const page = desktopConnections.at(-1)!.context.page;
+      (page as { viewportSize: () => unknown }).viewportSize = () => null;
+      const { browser } = yield* ready;
+      page.evaluate.mockImplementation((async () => ({ width: 390, height: 700 })) as never);
+      const viewer = yield* browser.attachViewer(viewerInput(desktopTab.tabId!, true));
+      const outputs = yield* Queue.takeAll(viewer.output);
+      expect(outputs).toContainEqual({ _tag: "viewport", width: 390, height: 700 });
+      expect(outputs).toContainEqual(expect.objectContaining({ _tag: "control" }));
+
+      // A hung read keeps the last good size and does not block attaching.
+      page.evaluate.mockImplementation((() => new Promise(() => {})) as never);
+      const second = yield* browser.attachViewer(viewerInput(desktopTab.tabId!, false));
+      const later = yield* Queue.takeAll(second.output);
+      expect(later).toContainEqual({ _tag: "viewport", width: 390, height: 700 });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
