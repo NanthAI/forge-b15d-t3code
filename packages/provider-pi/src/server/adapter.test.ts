@@ -2027,6 +2027,50 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const phases = ["tool_execution_update", "tool_execution_start", "tool_execution_end"];
+      for (const [index, type] of phases.entries()) {
+        yield* fake.emit({
+          type,
+          toolCallId: "call_code/1",
+          parentToolCallId: "call_code",
+          toolName: "read",
+          args: { path: "a.txt" },
+          partialResult: { content: [{ type: "text", text: "x" }] },
+          result: { content: [{ type: "text", text: "x" }] },
+          isError: index === 2,
+        });
+        const node = yield* takeEvent((event) => event.type === "node.updated");
+        const item = yield* takeEvent((event) => event.type === "turn_item.updated");
+        if (node.type !== "node.updated" || item.type !== "turn_item.updated")
+          return yield* Effect.die("Expected node and item");
+        assert.match(node.node.parentNodeId ?? "", /call_code$/);
+        assert.notMatch(node.node.parentNodeId ?? "", /call_code\/1/);
+        assert.match(item.turnItem.parentItemId ?? "", /call_code$/);
+      }
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "top",
+        toolName: "read",
+        args: {},
+      });
+      const top = yield* takeEvent((event) => event.type === "node.updated");
+      if (top.type !== "node.updated") return yield* Effect.die("Expected node");
+      assert.equal(top.node.parentNodeId, top.node.rootNodeId);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect(
     "keeps native and MCP images available to the shared asset reader with typed results",
     () =>
