@@ -36,6 +36,14 @@ const handleMethod = (message: Record<string, unknown>) => {
 
   switch (method) {
     case "initialize": {
+      const launcherFailure = process.env.CODEX_APP_SERVER_TEST_LAUNCHER_FAILURE;
+      if (launcherFailure) {
+        process.stderr.write(
+          `file:///opt/codex/bin/codex.js:107\n    throw new Error("x");\n    ^\n\n${launcherFailure}\n    at file:///opt/codex/bin/codex.js:107:11\n`,
+          () => process.exit(1),
+        );
+        return;
+      }
       // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone mock peer process has no Effect runtime.
       const platform = NodeOS.platform();
       const stderrBytes = Number(process.env.CODEX_APP_SERVER_TEST_STDERR_BYTES ?? 0);
