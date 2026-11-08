@@ -58,6 +58,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
+      if (desktopLoadedBeforeAttach) await context.page.goto(desktopLoadedBeforeAttach);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -282,6 +283,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopLoadedBeforeAttach: string | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -394,6 +396,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopLoadedBeforeAttach = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -504,6 +507,32 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      desktopLoadedBeforeAttach = "http://localhost:5173/loaded";
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false, url: "http://localhost:5173/loaded" },
+      });
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+        const status = sessions.find((session) => session.tabId === opened.tabId)?.navStatus;
+        if (status?._tag === "Success") {
+          expect(status.title).toBe("test page");
+          return;
+        }
+        yield* Effect.sleep("10 millis");
+      }
+      expect.unreachable("the desktop tab never left Loading");
     }),
   ).pipe(Effect.provide(layer)),
 );
