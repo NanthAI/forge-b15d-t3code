@@ -57,7 +57,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
       return makeEncoderPage() as unknown as Page;
     }
     async connectDesktopPage(endpoint: string) {
-      const context = makeContext();
+      const context = makeContext(undefined, desktopLoadedPage ?? undefined);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -137,12 +137,15 @@ function fileChooserElement(accept: string) {
   };
 }
 
-function makeContext(onClose?: (context: BrowserContext) => void) {
+function makeContext(
+  onClose?: (context: BrowserContext) => void,
+  loaded?: { readonly url: string; readonly title: string },
+) {
   const events = new NodeEvents.EventEmitter();
   const nativeFileChooser = vi.fn();
   const setChooserFiles = vi.fn(async (_files: unknown) => {});
   const sessions: ReturnType<typeof makeSession>[] = [];
-  let url = "about:blank";
+  let url = loaded?.url ?? "about:blank";
   let viewport = { width: 1280, height: 800 };
   let closed = false;
   let contextClosed = false;
@@ -172,7 +175,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     mainFrame: () => page,
     frames: () => [page],
     url: () => url,
-    title: vi.fn(async () => "test page"),
+    title: vi.fn(async () => loaded?.title ?? "test page"),
     viewportSize: () => viewport,
     setViewportSize: vi.fn(async (size: typeof viewport) => {
       viewport = size;
@@ -282,6 +285,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopLoadedPage: { url: string; title: string } | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -394,6 +398,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopLoadedPage = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -504,6 +509,35 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      yield* Effect.yieldNow;
+      desktopLoadedPage = { url: "https://example.com/done", title: "Loaded title" };
+      desktopRendersNext = true;
+      const opened = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url: "https://example.com/done",
+      });
+      let status;
+      do {
+        status = yield* PubSub.take(events);
+      } while (
+        status.type !== "navigated" ||
+        status.snapshot.tabId !== opened.tabId ||
+        status.snapshot.navStatus._tag !== "Success"
+      );
+      expect(status.snapshot.navStatus).toMatchObject({
+        url: "https://example.com/done",
+        title: "Loaded title",
+      });
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -1913,6 +1947,34 @@ it.live("failed session and browser launches release capacity, as does closing a
         input: {},
       });
       expect(status.tabs).toHaveLength(8);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop tab without a Playwright viewport sends the measured page size to viewers", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const page = desktopConnections.at(-1)!.context.page;
+      (page as { viewportSize: () => unknown }).viewportSize = () => null;
+      const { browser } = yield* ready;
+      page.evaluate.mockImplementation((async () => ({ width: 390, height: 700 })) as never);
+      const viewer = yield* browser.attachViewer(viewerInput(desktopTab.tabId!, true));
+      const outputs = yield* Queue.takeAll(viewer.output);
+      expect(outputs).toContainEqual({ _tag: "viewport", width: 390, height: 700 });
+      expect(outputs).toContainEqual(expect.objectContaining({ _tag: "control" }));
+
+      // A hung read keeps the last good size and does not block attaching.
+      page.evaluate.mockImplementation((() => new Promise(() => {})) as never);
+      const second = yield* browser.attachViewer(viewerInput(desktopTab.tabId!, false));
+      const later = yield* Queue.takeAll(second.output);
+      expect(later).toContainEqual({ _tag: "viewport", width: 390, height: 700 });
     }),
   ).pipe(Effect.provide(layer)),
 );
