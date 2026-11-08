@@ -1212,6 +1212,45 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
+      const emitSystemNotice = Effect.fnUntraced(function* (turn: ActivePiTurn, message: string) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            completedAt: emittedAt,
+            title: message,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      // Pi 0.80.5-0.85.x start queued messages as soon as abort arrives; drop them first (clear_queue: Pi 0.84.4+).
+      // Older Pi answers "Unknown command"; Stop proceeds regardless.
+      const clearPiQueueBeforeAbort = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+        const data: unknown = yield* request({ type: "clear_queue" }, 2_000).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        const texts: Array<string> = [];
+        for (const key of ["steering", "followUp"]) {
+          const list = recordField(data, key);
+          if (!Array.isArray(list)) continue;
+          for (const entry of list) texts.push(typeof entry === "string" ? entry : "");
+        }
+        if (texts.length === 0) return;
+        const listed = texts.filter((text) => text.trim().length > 0);
+        const count = texts.length;
+        const message =
+          `Stopped: Pi cleared ${count} queued ${count === 1 ? "message" : "messages"} it had not read yet.` +
+          (listed.length === 0 ? "" : ` ${listed.map((text) => JSON.stringify(text)).join(", ")}`);
+        yield* emitSystemNotice(turn, message).pipe(Effect.ignore);
+      });
+
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
@@ -1221,21 +1260,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
           if (turn === null || message.length === 0) return;
-          const emittedAt = yield* DateTime.now;
-          const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
-          yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
-          yield* emit({
-            type: "turn_item.updated",
-            driver: PI_PROVIDER,
-            turnItem: {
-              ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
-              status: "completed",
-              completedAt: emittedAt,
-              title: message,
-              type: "system_notice",
-              message,
-            },
-          });
+          yield* emitSystemNotice(turn, message);
           return;
         }
         if (
@@ -2641,6 +2666,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               // Generic abort misses manual compaction; terminate so Stop covers /compact and recovery.
               stopRequested = true;
               if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
+                yield* clearPiQueueBeforeAbort(turn);
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
               // Read rollback tree refs before termination breaks requests; the permit lets in-flight capture finish.
@@ -2654,6 +2680,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               );
               return;
             }
+            yield* clearPiQueueBeforeAbort(turn);
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
