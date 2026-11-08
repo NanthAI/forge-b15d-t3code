@@ -59,6 +59,11 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
       desktopConnections.push({ endpoint, context });
+      if (desktopLoadedBeforeAttach) {
+        // The desktop navigated and finished loading before the server listened.
+        await context.page.goto(desktopLoadedBeforeAttach.url);
+        context.page.title.mockImplementation(async () => desktopLoadedBeforeAttach!.title);
+      }
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
     async close() {
@@ -282,6 +287,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopLoadedBeforeAttach: { url: string; title: string } | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -394,6 +400,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopLoadedBeforeAttach = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -504,6 +511,32 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      desktopLoadedBeforeAttach = { url: "https://example.com/app", title: "Loaded app" };
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+        const navStatus = sessions.find((session) => session.tabId === desktopTab.tabId)?.navStatus;
+        if (navStatus?._tag === "Success") {
+          expect(navStatus).toMatchObject({ url: "https://example.com/app", title: "Loaded app" });
+          return;
+        }
+        yield* Effect.sleep("20 millis");
+      }
+      expect.unreachable("the session never reported the loaded page");
     }),
   ).pipe(Effect.provide(layer)),
 );
