@@ -433,7 +433,12 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const cached = authenticated.get(login.url);
     if (token && cached?.token === token && now - cached.time < 30_000) return token;
-    yield* execute({ command: "fj", cwd, args: ["--host", login.url, "whoami"] });
+    // fj 0.7 reads the cwd's git repository even with --host and fails on an unborn branch,
+    // so run from the home directory; --host already names the server.
+    const home = yield* HostProcess.HomeDirectory;
+    yield* execute({ command: "fj", cwd: home, args: ["--host", login.url, "whoami"] }).pipe(
+      Effect.mapError((error) => new ForgejoCliError({ ...error, cwd })),
+    );
     // fj owns OAuth renewal. Re-read the file after it has refreshed an expired token.
     const refreshed = (yield* readKeys(cwd)).hosts[login.name]?.token;
     if (!refreshed)

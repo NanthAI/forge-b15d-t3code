@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import { SourceControlProviderError } from "@t3tools/contracts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import {
@@ -94,7 +95,8 @@ export const makeDiscovery = Effect.gen(function* () {
         logins.find((entry) => entry.default === "true") ||
         logins[0];
       const fj = yield* probeSourceControlProvider({
-        cwd,
+        // fj 0.7 reads the cwd's git repository even with --host and fails on an unborn branch.
+        cwd: yield* HostProcess.HomeDirectory,
         process,
         spec: {
           ...discovery,
