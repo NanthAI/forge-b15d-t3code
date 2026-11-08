@@ -1,6 +1,9 @@
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
@@ -10,6 +13,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -153,6 +157,46 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       );
 
       assert.equal(initialized.userAgent, "mock-codex-app-server");
+    }),
+  );
+
+  it.effect("warns once about a notification that fails to decode and keeps dispatching", () =>
+    Effect.gen(function* () {
+      const warnings: Array<{ message: unknown }> = [];
+      const logger = Logger.make<unknown, void>((options) => {
+        if (options.logLevel === "Warn") {
+          warnings.push({ message: options.message });
+        }
+      });
+      const received = yield* Ref.make<Array<unknown>>([]);
+      const delivered = yield* Deferred.make<void>();
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const encoder = new TextEncoder();
+      const sentinel = "SENTINEL-SECRET-TURN-ID";
+      const frame = (params: unknown) =>
+        encoder.encode(`${JSON.stringify({ method: "item/agentMessage/delta", params })}\n`);
+
+      yield* Effect.gen(function* () {
+        const client = yield* CodexClient.make(stdio);
+        yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
+          Ref.update(received, (current) => [...current, payload]).pipe(
+            Effect.andThen(Deferred.succeed(delivered, undefined)),
+          ),
+        );
+        const bad = { threadId: "t", turnId: sentinel, itemId: "i" };
+        yield* Queue.offer(input, frame(bad));
+        yield* Queue.offer(input, frame(bad));
+        yield* Queue.offer(input, frame({ ...bad, turnId: "turn-1", delta: "hi" }));
+        yield* Deferred.await(delivered);
+      }).pipe(Effect.provide(Logger.layer([logger])), Effect.scoped);
+
+      assert.equal((yield* Ref.get(received)).length, 1);
+      assert.equal(warnings.length, 1);
+      const text = JSON.stringify(warnings[0]);
+      assert.include(text, "Dropped a Codex App Server notification that failed to decode");
+      assert.include(text, "item/agentMessage/delta");
+      assert.include(text, "MissingKey");
+      assert.notInclude(text, sentinel);
     }),
   );
 });
