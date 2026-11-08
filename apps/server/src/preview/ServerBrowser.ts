@@ -907,6 +907,12 @@ const make = Effect.gen(function* () {
     page.on("crash", () => dropTab(tab, true));
     tabs.set(key, tab);
     reportLiveTabs();
+    // The desktop navigates its own page, so it may have loaded before these listeners attached.
+    if (desktop) {
+      void page.waitForLoadState("load").then(() => {
+        if (tabs.get(key) === tab) void reportLoaded(tab);
+      }, constVoid);
+    }
     // Existing desktop and popup PDFs can start loading before interception attaches.
     if (
       snapshot.navStatus._tag === "Loading" &&
