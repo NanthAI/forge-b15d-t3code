@@ -220,6 +220,13 @@ describe("server browser element refs", () => {
     await expect(ServerBrowserPage.click(other, { locator })).rejects.toThrow(/another tab/);
   });
 
+  it("redacts a data: page's URL in snapshots", async () => {
+    await page.goto("data:text/html,<p>SECRET</p>");
+    const snapshot = await takeSnapshot();
+    expect(snapshot.url).toBe("data:text/html,…");
+    expect(snapshot.visibleText).toContain("SECRET");
+  });
+
   it("revokes refs after navigation even when labels are identical", async () => {
     await page.goto("data:text/html,<button>continue</button>");
     const locator = buttonLocator((await takeSnapshot()).accessibilityTree, "continue");
