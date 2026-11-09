@@ -1,3 +1,4 @@
+import * as NodeOS from "node:os";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -1403,13 +1404,14 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
-            assert.deepStrictEqual(input.args, [
-              "--host",
-              input.cwd === "/no-remotes"
-                ? "https://forgejo.local:3000"
-                : "http://forgejo.local:3000",
-              "whoami",
-            ]);
+            // The fj login check runs from the home directory, so the project cwd is not visible here.
+            assert.strictEqual(input.cwd, NodeOS.homedir());
+            assert.strictEqual(input.args[0], "--host");
+            assert.include(
+              ["https://forgejo.local:3000", "http://forgejo.local:3000"],
+              input.args[1],
+            );
+            assert.strictEqual(input.args[2], "whoami");
             return Effect.succeed(processOutput(""));
           },
         },
@@ -1518,6 +1520,7 @@ it.effect("loads later fj review pages when the server caps pages below the requ
               );
             }
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.cwd, NodeOS.homedir());
             assert.deepStrictEqual(input.args, ["--host", "https://forgejo.test", "whoami"]);
             return Effect.succeed(processOutput(""));
           },
@@ -1689,6 +1692,7 @@ it.effect(
                             cause: new Error("fj not found"),
                           }),
                         );
+                      assert.strictEqual(input.cwd, NodeOS.homedir());
                       if (input.args[0] === "version")
                         return Effect.succeed(processOutput("fj 0.10.0"));
                       if (scenario === "invalid-storage") {
