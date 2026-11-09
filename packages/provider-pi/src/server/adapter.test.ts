@@ -2495,6 +2495,58 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_code",
+        toolName: "code",
+        args: {},
+      });
+      // Update arrives before the nested call's start.
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "call_code/1",
+        parentToolCallId: "call_code",
+        toolName: "read",
+        args: {},
+        partialResult: { content: [{ type: "text", text: "x" }] },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_code/1",
+        parentToolCallId: "call_code",
+        toolName: "read",
+        isError: false,
+        result: { content: [{ type: "text", text: "x" }] },
+      });
+      const node = yield* takeEvent(
+        (event) =>
+          event.type === "node.updated" && event.node.nativeItemRef?.nativeId === "call_code/1",
+      );
+      const item = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.nativeItemRef?.nativeId === "call_code/1",
+      );
+      assert.isTrue(node.type === "node.updated" && item.type === "turn_item.updated");
+      if (node.type !== "node.updated" || item.type !== "turn_item.updated") return;
+      assert.strictEqual(node.node.parentNodeId, "node:provider:pi:native-item:call_code");
+      assert.notStrictEqual(node.node.parentNodeId, node.node.rootNodeId);
+      assert.isTrue(item.turnItem.parentItemId !== null);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect.each([false, true])("follows an extension rewind with summarize=%s", (summarize) =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

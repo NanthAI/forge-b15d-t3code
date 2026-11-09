@@ -59,6 +59,40 @@ it.layer(layer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect("keeps only the media type of a data: page in reported status", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const collector = yield* collectEvents;
+      const opened = yield* manager.open({ threadId });
+      yield* manager.reportStatus({
+        threadId,
+        tabId: opened.tabId,
+        navStatus: { _tag: "Success", url: "data:text/html,<p>SECRET</p>", title: "T" },
+        canGoBack: false,
+        canGoForward: false,
+      });
+      yield* manager.reportStatus({
+        threadId,
+        tabId: opened.tabId,
+        navStatus: {
+          _tag: "LoadFailed",
+          url: "data:text/html;base64,U0VDUkVU",
+          title: "T",
+          code: -2,
+          description: "x",
+        },
+        canGoBack: false,
+        canGoForward: false,
+      });
+      const listed = yield* manager.list({ threadId });
+      expect(listed.sessions[0]?.navStatus).toMatchObject({ url: "data:text/html,…" });
+      const serialized = JSON.stringify([listed, yield* collector.drain]);
+      expect(serialized).not.toContain("SECRET");
+      expect(serialized).not.toContain("U0VDUkVU");
+    }),
+  );
+
   it.effect("keeps the tab's profile across status reports", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
