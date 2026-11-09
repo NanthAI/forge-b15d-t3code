@@ -4,6 +4,7 @@ import {
   type PreviewError,
   PreviewInvalidUrlError,
   type PreviewListInput,
+  type PreviewNavStatus,
   type PreviewListResult,
   type PreviewOpenInput,
   type PreviewReportStatusInput,
@@ -28,6 +29,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { PreviewControlRequiredError } from "@t3tools/contracts";
+import { withoutDataPayload } from "./ServerBrowserPage.ts";
 
 export class PreviewManager extends Context.Service<
   PreviewManager,
@@ -93,6 +95,9 @@ const sessionsForThread = (
   }
   return out;
 };
+
+const redactNavStatus = (navStatus: PreviewNavStatus): PreviewNavStatus =>
+  navStatus._tag === "Idle" ? navStatus : { ...navStatus, url: withoutDataPayload(navStatus.url) };
 
 const normalizeUrl = (rawUrl: string): Effect.Effect<string, PreviewInvalidUrlError> =>
   Effect.try({
@@ -228,31 +233,30 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       input.threadId,
       input.tabId,
       Effect.fn("PreviewManager.reportSessionStatus")(function* (session) {
+        const navStatus = redactNavStatus(input.navStatus);
         if (session.snapshot.runtime === "server" && !input.serverControlled)
           return yield* new PreviewControlRequiredError({ tabId: input.tabId });
         const updatedAt = yield* currentIsoTimestamp;
         const snapshot: PreviewSessionSnapshot = {
           ...session.snapshot,
-          navStatus: input.navStatus,
+          navStatus,
           canGoBack: input.canGoBack,
           canGoForward: input.canGoForward,
           viewport: session.snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
           updatedAt,
         };
         const emit: PreviewEventDraft =
-          input.navStatus._tag === "LoadFailed"
+          navStatus._tag === "LoadFailed"
             ? {
                 type: "failed",
                 threadId: session.threadId,
                 tabId: session.tabId,
                 createdAt: snapshot.updatedAt,
-                url: input.navStatus.url,
-                title: input.navStatus.title,
-                code: input.navStatus.code,
-                description: input.navStatus.description,
-                ...(input.navStatus.download === undefined
-                  ? {}
-                  : { download: input.navStatus.download }),
+                url: navStatus.url,
+                title: navStatus.title,
+                code: navStatus.code,
+                description: navStatus.description,
+                ...(navStatus.download === undefined ? {} : { download: navStatus.download }),
               }
             : {
                 type: "navigated",

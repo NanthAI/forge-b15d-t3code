@@ -9,6 +9,9 @@ describe("classifyChangedFile", () => {
     ["pnpm-lock.yaml", "generated"],
     ["README.md", "docs"],
     ["tests/README.md", "tests"],
+    ["convex/_generated/api.d.ts", "generated"],
+    ["src/agent.eval.ts", "tests"],
+    ["evals/case.json", "tests"],
   ] as const)("%s is %s", (path, kind) => {
     expect(classifyChangedFile(path)).toBe(kind);
   });
