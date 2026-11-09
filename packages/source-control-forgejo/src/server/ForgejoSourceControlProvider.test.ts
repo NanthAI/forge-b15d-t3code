@@ -1294,6 +1294,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
 
 it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
   const commands: string[] = [];
+  let lastGitCwd = "";
   const requests: string[] = [];
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
@@ -1392,6 +1393,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
         process: {
           run: (input) => {
             commands.push(input.command);
+            if (input.command === "git") lastGitCwd = input.cwd;
             if (input.command === "git")
               return Effect.succeed(
                 input.cwd === "/no-remotes"
@@ -1403,9 +1405,10 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
+            assert.notStrictEqual(input.cwd, lastGitCwd);
             assert.deepStrictEqual(input.args, [
               "--host",
-              input.cwd === "/no-remotes"
+              lastGitCwd === "/no-remotes"
                 ? "https://forgejo.local:3000"
                 : "http://forgejo.local:3000",
               "whoami",
@@ -1518,6 +1521,7 @@ it.effect("loads later fj review pages when the server caps pages below the requ
               );
             }
             assert.strictEqual(input.command, "fj");
+            assert.notStrictEqual(input.cwd, "/repo");
             assert.deepStrictEqual(input.args, ["--host", "https://forgejo.test", "whoami"]);
             return Effect.succeed(processOutput(""));
           },
@@ -1680,6 +1684,7 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.notStrictEqual(input.cwd, "/repo");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
