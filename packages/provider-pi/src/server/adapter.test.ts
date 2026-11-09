@@ -2495,6 +2495,54 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_code",
+        toolName: "codemode",
+        args: {},
+      });
+      // The update arrives before the nested call's start.
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "call_code/1",
+        parentToolCallId: "call_code",
+        toolName: "read",
+        args: {},
+        partialResult: { content: [{ type: "text", text: "x" }] },
+      });
+      const parent = yield* takeEvent(
+        (event) => event.type === "node.updated" && event.node.nativeItemRef?.nativeId === "call_code",
+      );
+      const nested = yield* takeEvent(
+        (event) => event.type === "node.updated" && event.node.nativeItemRef?.nativeId === "call_code/1",
+      );
+      const nestedItem = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === "call_code/1",
+      );
+      assert.isTrue(parent.type === "node.updated" && nested.type === "node.updated");
+      if (parent.type !== "node.updated" || nested.type !== "node.updated") return;
+      assert.strictEqual(nested.node.parentNodeId, parent.node.id);
+      assert.strictEqual(nested.node.rootNodeId, parent.node.rootNodeId);
+      assert.isTrue(nestedItem.type === "turn_item.updated");
+      if (nestedItem.type !== "turn_item.updated") return;
+      assert.notStrictEqual(nestedItem.turnItem.parentItemId, null);
+      assert.strictEqual(parent.node.parentNodeId, parent.node.rootNodeId);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect.each([false, true])("follows an extension rewind with summarize=%s", (summarize) =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
