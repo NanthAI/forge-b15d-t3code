@@ -1239,7 +1239,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         turn: NonNullable<NonNullable<typeof threadState>["activeTurn"]>,
       ) {
         const data = yield* request({ type: "clear_queue" }, 2_000).pipe(
-          Effect.catch(() => Effect.succeed(undefined)),
+          Effect.orElseSucceed(() => undefined),
         );
         const texts = (key: string): ReadonlyArray<string> => {
           const value = (data as Record<string, unknown> | null | undefined)?.[key];
@@ -1636,7 +1636,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 probeFailed: true,
               }),
           }),
-          Effect.ignore,
+          Effect.orElseSucceed(() => undefined),
           Effect.forkIn(scope),
         );
       };
@@ -2450,7 +2450,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 Effect.tap(() =>
                   Effect.sync(() => (appliedSessionName = turnInput.appThread.title)),
                 ),
-                Effect.ignore,
+                Effect.orElseSucceed(() => undefined),
               );
             }
             // Resolve attachments before turn installation so failures cannot strand activeTurn.
@@ -3014,7 +3014,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 });
                 yield* Stream.fromQueue(forkConnection.events).pipe(
                   Stream.runDrain,
-                  Effect.ignore,
+                  Effect.orElseSucceed(() => undefined),
                   Effect.forkScoped,
                 );
                 const beforeEntry =
