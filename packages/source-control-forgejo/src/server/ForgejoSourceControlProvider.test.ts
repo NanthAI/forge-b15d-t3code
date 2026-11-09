@@ -14,6 +14,7 @@ import { VcsProcessSpawnError } from "@t3tools/contracts";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as ForgejoPullRequestProvider from "./ForgejoPullRequestProvider.ts";
 import * as ForgejoSourceControlProvider from "./ForgejoSourceControlProvider.ts";
@@ -1295,6 +1296,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
 it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
   const commands: string[] = [];
   const requests: string[] = [];
+  const whoamiHosts: string[] = [];
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
     for (const remoteUrl of [
@@ -1348,6 +1350,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
     });
     assert.strictEqual(upstreamRepository.baseUrl, "http://forgejo.local:3000");
     assert.strictEqual(upstreamRepository.repository, "maria/project");
+    assert.include(whoamiHosts, "http://forgejo.local:3000");
     const httpViewer = yield* cli.api({ cwd: "/repo", host: "forgejo.local:3000", path: "user" });
     assert.strictEqual(httpViewer.stdout, '{"login":"maria"}');
     assert.strictEqual(requests.at(-1), "http://forgejo.local:3000/api/v1/user");
@@ -1387,6 +1390,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
         );
       }),
     ),
+    Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
     Effect.provide(
       TestSourceControlHost.layer({
         process: {
@@ -1403,13 +1407,10 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
-            assert.deepStrictEqual(input.args, [
-              "--host",
-              input.cwd === "/no-remotes"
-                ? "https://forgejo.local:3000"
-                : "http://forgejo.local:3000",
-              "whoami",
-            ]);
+            assert.strictEqual(input.cwd, "/home/test");
+            assert.strictEqual(input.args[0], "--host");
+            assert.strictEqual(input.args[2], "whoami");
+            whoamiHosts.push(input.args[1] ?? "");
             return Effect.succeed(processOutput(""));
           },
         },
@@ -1507,6 +1508,7 @@ it.effect("loads later fj review pages when the server caps pages below the requ
         );
       }),
     ),
+    Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
     Effect.provide(
       TestSourceControlHost.layer({
         process: {
@@ -1518,6 +1520,7 @@ it.effect("loads later fj review pages when the server caps pages below the requ
               );
             }
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.cwd, "/home/test");
             assert.deepStrictEqual(input.args, ["--host", "https://forgejo.test", "whoami"]);
             return Effect.succeed(processOutput(""));
           },
@@ -1638,6 +1641,7 @@ it.effect(
         }).pipe(
           Effect.provide(
             Layer.mergeAll(
+              Layer.succeed(HostProcess.HomeDirectory, "/home/test"),
               Layer.mock(ForgejoCli.ForgejoCli)({
                 getAccount: (input) => {
                   assert.strictEqual(scenario, "authenticated");
@@ -1680,6 +1684,7 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.strictEqual(input.cwd, "/home/test");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
