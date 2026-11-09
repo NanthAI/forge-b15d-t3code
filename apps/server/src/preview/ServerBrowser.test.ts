@@ -1916,3 +1916,37 @@ it.live("failed session and browser launches release capacity, as does closing a
     }),
   ).pipe(Effect.provide(layer)),
 );
+
+it.live("a viewer of a desktop tab gets the page's CSS size and keeps the last good one", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, browser } = yield* ready;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const page = desktopConnections[0]!.context.page;
+      page.evaluate.mockImplementation((async () => ({ width: 390.4, height: 700 })) as never);
+      const viewer = yield* browser.attachViewer(viewerInput(desktopTab.tabId!, true));
+      const seen: Array<unknown> = [];
+      for (let index = 0; index < 20; index++) {
+        const next = yield* Queue.take(viewer.output);
+        seen.push(next);
+        if (next._tag === "viewport") break;
+      }
+      expect(seen).toContainEqual({ _tag: "viewport", width: 390, height: 700 });
+
+      // A hung read keeps the last good size and does not block the status call.
+      page.evaluate.mockImplementation((() => new Promise(() => {})) as never);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(desktopTab.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect(status.viewport).toEqual({ width: 390, height: 700 });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
