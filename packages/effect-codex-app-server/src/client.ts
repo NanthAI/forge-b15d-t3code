@@ -153,6 +153,24 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       >
     | undefined => CodexRpc.CLIENT_NOTIFICATION_PARAMS[method] as never;
 
+  const warnedNotificationFailures = new Set<string>();
+  const warnDroppedNotification = (error: CodexError.CodexAppServerProtocolParseError) => {
+    const key = JSON.stringify([error.method, error.issueKinds]);
+    if (warnedNotificationFailures.has(key)) return Effect.void;
+    warnedNotificationFailures.add(key);
+    return Effect.logWarning("Dropped a Codex App Server notification that failed to decode").pipe(
+      Effect.annotateLogs({
+        operation: error.operation,
+        ...(error.method === undefined ? {} : { method: error.method }),
+        ...(error.issueCount === undefined ? {} : { issueCount: error.issueCount }),
+        ...(error.issueKinds === undefined ? {} : { issueKinds: error.issueKinds }),
+        ...(error.maximumPathDepth === undefined
+          ? {}
+          : { maximumPathDepth: error.maximumPathDepth }),
+      }),
+    );
+  };
+
   const dispatchNotification = (
     notification: CodexProtocol.CodexAppServerIncomingNotification,
   ): Effect.Effect<void, never> => {
@@ -169,6 +187,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
         Effect.flatMap((decoded) =>
           Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
         ),
+        Effect.tapErrorTag("CodexAppServerProtocolParseError", warnDroppedNotification),
         Effect.ignore,
       );
     }

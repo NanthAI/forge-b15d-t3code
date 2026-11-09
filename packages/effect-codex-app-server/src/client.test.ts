@@ -1,5 +1,9 @@
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as Queue from "effect/Queue";
+import * as References from "effect/References";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
@@ -10,6 +14,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -153,6 +158,49 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       );
 
       assert.equal(initialized.userAgent, "mock-codex-app-server");
+    }),
+  );
+  it.effect("warns once about a notification that fails to decode and keeps dispatching", () =>
+    Effect.gen(function* () {
+      const warnings: Array<{ message: unknown; annotations: Record<string, unknown> }> = [];
+      const logger = Logger.make<unknown, void>((options) => {
+        if (options.logLevel === "Warn") {
+          warnings.push({
+            message: options.message,
+            annotations: { ...options.fiber.getRef(References.CurrentLogAnnotations) },
+          });
+        }
+      });
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const received = yield* Ref.make<Array<unknown>>([]);
+      const done = yield* Deferred.make<void>();
+      const sentinel = "SENTINEL-secret-turn-id";
+      yield* Effect.gen(function* () {
+        const client = yield* CodexClient.make(stdio);
+        yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
+          Ref.update(received, (current) => [...current, payload]).pipe(
+            Effect.andThen(Deferred.succeed(done, undefined)),
+          ),
+        );
+        const send = (params: unknown) =>
+          Queue.offer(
+            input,
+            new TextEncoder().encode(
+              `${JSON.stringify({ method: "item/agentMessage/delta", params })}\n`,
+            ),
+          );
+        const bad = { itemId: "i", threadId: "t", turnId: sentinel };
+        yield* send(bad);
+        yield* send(bad);
+        yield* send({ ...bad, delta: "ok" });
+        yield* Deferred.await(done);
+      }).pipe(Effect.provide(Logger.layer([logger])), Effect.scoped);
+
+      assert.equal((yield* Ref.get(received)).length, 1);
+      assert.equal(warnings.length, 1);
+      assert.equal(warnings[0]!.annotations.method, "item/agentMessage/delta");
+      assert.include(warnings[0]!.annotations.issueKinds as ReadonlyArray<string>, "MissingKey");
+      assert.notInclude(JSON.stringify(warnings), sentinel);
     }),
   );
 });
