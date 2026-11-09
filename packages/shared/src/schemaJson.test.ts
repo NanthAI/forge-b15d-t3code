@@ -41,6 +41,19 @@ Done.`),
     });
   });
 
+  it("ends line comments at LF, CRLF and lone CR", () => {
+    for (const eol of ["\n", "\r\n", "\r"]) {
+      expect(decodeLenientJson(`{"enabled":true,// comment${eol}"values":[1,2],${eol}}`)).toEqual({
+        enabled: true,
+        values: [1, 2],
+      });
+    }
+    expect(decodeLenientJson('{"enabled":true,// comment\r"values":[1,2],\n}')).toEqual({
+      enabled: true,
+      values: [1, 2],
+    });
+  });
+
   it("preserves comment markers and commas before brackets inside string values", () => {
     expect(decodeLenientJson('"1/* https://example.com */2"')).toBe("1/* https://example.com */2");
     expect(decodeLenientJson('{"note":"a,]"}')).toEqual({ note: "a,]" });
