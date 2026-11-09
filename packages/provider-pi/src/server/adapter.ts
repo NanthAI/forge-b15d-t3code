@@ -729,6 +729,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         nativeItemId: string,
         startedAt: DateTime.Utc,
         updatedAt: DateTime.Utc,
+        parentNativeItemId?: string,
       ) => ({
         id: idAllocator.derive.turnItemFromProviderItem({
           driver: PI_PROVIDER,
@@ -743,7 +744,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         providerThreadId: turn.turnInput.providerThread.id,
         providerTurnId: turn.providerTurn.id,
         nativeItemRef: providerRef(nativeItemId),
-        parentItemId: null,
+        parentItemId:
+          parentNativeItemId === undefined
+            ? null
+            : idAllocator.derive.turnItemFromProviderItem({
+                driver: PI_PROVIDER,
+                nativeItemId: parentNativeItemId,
+              }),
         ordinal: itemOrdinal(turn, nativeItemId),
         startedAt,
         updatedAt,
@@ -756,6 +763,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         status: OrchestrationV2ExecutionNode["status"],
         startedAt: DateTime.Utc,
         completedAt: DateTime.Utc | null,
+        parentNativeItemId?: string,
       ) =>
         emit({
           type: "node.updated",
@@ -767,7 +775,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             }),
             threadId: turn.turnInput.threadId,
             runId: turn.turnInput.runId,
-            parentNodeId: turn.turnInput.rootNodeId,
+            parentNodeId:
+              parentNativeItemId === undefined
+                ? turn.turnInput.rootNodeId
+                : idAllocator.derive.nodeFromProviderItem({
+                    driver: PI_PROVIDER,
+                    nativeItemId: parentNativeItemId,
+                  }),
             rootNodeId: turn.turnInput.rootNodeId,
             kind,
             status,
@@ -999,7 +1013,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               : "failed"
             : "completed"
           : "running";
-        const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);
+        const parentToolCallId = recordString(event, "parentToolCallId");
+        const base = baseItemFields(turn, toolCallId, startedAt, emittedAt, parentToolCallId);
         yield* emitItemNode(
           turn,
           toolCallId,
@@ -1007,6 +1022,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           status,
           startedAt,
           completed ? emittedAt : null,
+          parentToolCallId,
         );
         const shared = {
           ...base,
@@ -1212,6 +1228,55 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
+      const emitSystemNotice = Effect.fnUntraced(function* (
+        turn: NonNullable<NonNullable<typeof threadState>["activeTurn"]>,
+        message: string,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            completedAt: emittedAt,
+            title: message,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      // Pi 0.80.5-0.85.x start queued messages on abort and persist them; drop them first (0.84.4+).
+      // Older Pi answers "Unknown command"; any failure falls through to the normal abort.
+      const clearNativeQueue = Effect.fnUntraced(function* (
+        turn: NonNullable<NonNullable<typeof threadState>["activeTurn"]>,
+      ) {
+        const data = yield* request({ type: "clear_queue" }, 2_000).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        const texts = (key: string): ReadonlyArray<string> => {
+          const value = (data as Record<string, unknown> | null | undefined)?.[key];
+          return Array.isArray(value)
+            ? value.filter((v): v is string => typeof v === "string")
+            : [];
+        };
+        const cleared = [...texts("steering"), ...texts("followUp")];
+        if (cleared.length === 0) return;
+        const listed = cleared.filter((text) => text.trim().length > 0);
+        const count = cleared.length;
+        const noun = count === 1 ? "message" : "messages";
+        const message =
+          listed.length === 0
+            ? `Stopped. Pi never read ${count} queued ${noun}.`
+            : `Stopped. Pi never read ${count} queued ${noun}:\n${listed.map((text) => `- ${text}`).join("\n")}`;
+        yield* sessionEventPermit.withPermits(1)(
+          threadState?.activeTurn === turn ? emitSystemNotice(turn, message) : Effect.void,
+        );
+      });
+
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
@@ -1221,21 +1286,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
           if (turn === null || message.length === 0) return;
-          const emittedAt = yield* DateTime.now;
-          const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
-          yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
-          yield* emit({
-            type: "turn_item.updated",
-            driver: PI_PROVIDER,
-            turnItem: {
-              ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
-              status: "completed",
-              completedAt: emittedAt,
-              title: message,
-              type: "system_notice",
-              message,
-            },
-          });
+          yield* emitSystemNotice(turn, message);
           return;
         }
         if (
@@ -1601,7 +1652,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 probeFailed: true,
               }),
           }),
-          Effect.ignore,
+          Effect.orElseSucceed(() => undefined),
           Effect.forkIn(scope),
         );
       };
@@ -2415,7 +2466,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 Effect.tap(() =>
                   Effect.sync(() => (appliedSessionName = turnInput.appThread.title)),
                 ),
-                Effect.ignore,
+                Effect.orElseSucceed(() => undefined),
               );
             }
             // Resolve attachments before turn installation so failures cannot strand activeTurn.
@@ -2641,6 +2692,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               // Generic abort misses manual compaction; terminate so Stop covers /compact and recovery.
               stopRequested = true;
               if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
+                yield* clearNativeQueue(turn);
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
               // Read rollback tree refs before termination breaks requests; the permit lets in-flight capture finish.
@@ -2654,6 +2706,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               );
               return;
             }
+            yield* clearNativeQueue(turn);
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
@@ -2977,7 +3030,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 });
                 yield* Stream.fromQueue(forkConnection.events).pipe(
                   Stream.runDrain,
-                  Effect.ignore,
+                  Effect.orElseSucceed(() => undefined),
                   Effect.forkScoped,
                 );
                 const beforeEntry =
