@@ -121,6 +121,7 @@ const EDITABLE_AT_POINT_SCRIPT = `(x, y) => {
   const nonText = ["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"];
   return !nonText.includes(element.type) && !element.disabled && !element.readOnly;
 }`;
+const DESKTOP_SIZE_TIMEOUT_MS = 2000;
 const UNATTACHED_FILL_VIEWPORT = { width: 1280, height: 800 } as const;
 const NAVIGATION_TIMEOUT_MS = 15_000;
 const VIEWER_NAVIGATION_OPTIONS = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
@@ -626,7 +627,55 @@ const make = Effect.gen(function* () {
     });
   };
 
+  // Desktop pages have no Playwright viewport, so their CSS size is read from the page.
+  // Reads are serialized per tab, bounded in time, and fall back to the last good size.
+  const desktopSizes = new WeakMap<
+    ServerTab,
+    { last: { width: number; height: number } | null; inflight: Promise<unknown> | null }
+  >();
+  const measureDesktop = (tab: ServerTab): Promise<{ width: number; height: number } | null> => {
+    let state = desktopSizes.get(tab);
+    if (!state) {
+      state = { last: null, inflight: null };
+      desktopSizes.set(tab, state);
+    }
+    const entry = state;
+    if (entry.inflight) return entry.inflight.then(() => entry.last);
+    const read = tab.page
+      .evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+      .then((size) => {
+        if (
+          size &&
+          Number.isFinite(size.width) &&
+          Number.isFinite(size.height) &&
+          size.width > 0 &&
+          size.height > 0
+        ) {
+          entry.last = { width: Math.round(size.width), height: Math.round(size.height) };
+        }
+      })
+      .catch(constVoid);
+    const timeout = new Promise<void>((resolve) => setTimeout(resolve, DESKTOP_SIZE_TIMEOUT_MS));
+    const bounded = Promise.race([read, timeout]);
+    // A hung read keeps blocking later reads until it settles, so only one is ever pending.
+    const pending: Promise<unknown> = read.finally(() => {
+      if (entry.inflight === pending) entry.inflight = null;
+    });
+    entry.inflight = pending;
+    return bounded.then(() => entry.last);
+  };
+
+  const currentSize = async (tab: ServerTab) =>
+    tab.desktop ? await measureDesktop(tab) : layoutSize(tab);
+
   const broadcastViewport = (tab: ServerTab) => {
+    if (tab.desktop) {
+      void measureDesktop(tab).then((size) => {
+        if (!size) return;
+        for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
+      });
+      return;
+    }
     const size = layoutSize(tab);
     if (!size) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
@@ -1487,7 +1536,7 @@ const make = Effect.gen(function* () {
       };
     }
     const url = tab.page.url();
-    const viewport = tab.page.viewportSize();
+    const viewport = tab.desktop ? await measureDesktop(tab) : tab.page.viewportSize();
     const status = {
       available: true,
       visible: tab.viewers.size > 0,
@@ -2069,7 +2118,7 @@ const make = Effect.gen(function* () {
         return {
           tabId: tab.tabId,
           setting,
-          viewport: tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT,
+          viewport: (await currentSize(tab)) ?? UNATTACHED_FILL_VIEWPORT,
         };
       }
       case "setColorScheme": {
@@ -2419,7 +2468,13 @@ const make = Effect.gen(function* () {
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss replaces its backlog. It runs
         // synchronously so an older replacement can never land after a newer one.
-        else if (next._tag === "gone" || next._tag === "control" || next._tag === "fileChooser") {
+        else if (
+          next._tag === "gone" ||
+          next._tag === "control" ||
+          next._tag === "fileChooser" ||
+          next._tag === "viewport" ||
+          next._tag === "reconnect"
+        ) {
           const dropped = Effect.runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
           Queue.offerUnsafe(output, next);

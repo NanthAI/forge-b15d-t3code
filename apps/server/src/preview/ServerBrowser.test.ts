@@ -663,6 +663,41 @@ it.live("enforces provider ownership and explicit targets when a session has mul
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a viewer of a desktop tab gets the page's measured CSS size and keeps the last good one", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker } = yield* ready;
+      desktopRendersNext = true;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const page = desktopConnections.at(-1)!.context.page as unknown as {
+        viewportSize: () => null;
+        evaluate: ReturnType<typeof vi.fn>;
+      };
+      page.viewportSize = () => null;
+      page.evaluate.mockImplementation(async () => ({ width: 412, height: 780 }));
+      const viewer = yield* browser.attachViewer(viewerInput(opened.tabId!, true));
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(yield* Queue.takeAll(viewer.output)).toContainEqual({
+        _tag: "viewport",
+        width: 412,
+        height: 780,
+      });
+      page.evaluate.mockImplementation(() => new Promise(() => {}));
+      const second = yield* browser.attachViewer(viewerInput(opened.tabId!, true));
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 2100)));
+      expect(yield* Queue.takeAll(second.output)).toContainEqual({
+        _tag: "viewport",
+        width: 412,
+        height: 780,
+      });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("streams to a read-only viewer without allowing takeover, input, or viewport changes", () =>
   Effect.scoped(
     Effect.gen(function* () {
