@@ -59,6 +59,8 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
       desktopConnections.push({ endpoint, context });
+      // The desktop navigated before the server attached; no listener sees `load`.
+      if (desktopLoadedUrl) await context.page.goto(desktopLoadedUrl);
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
     async close() {
@@ -282,6 +284,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopLoadedUrl: string | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -394,6 +397,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopLoadedUrl = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -504,6 +508,32 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      desktopLoadedUrl = "https://example.com/loaded";
+      const opened = yield* manager.open({ threadId: scope.thread.threadId, runtime: "server" });
+      let status;
+      do {
+        status = yield* PubSub.take(events);
+      } while (
+        status.type !== "navigated" ||
+        status.snapshot.tabId !== opened.tabId ||
+        status.snapshot.navStatus._tag !== "Success"
+      );
+      expect(status.snapshot.navStatus).toMatchObject({
+        url: "https://example.com/loaded",
+        title: "test page",
+      });
     }),
   ).pipe(Effect.provide(layer)),
 );
