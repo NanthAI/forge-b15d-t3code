@@ -121,6 +121,7 @@ const EDITABLE_AT_POINT_SCRIPT = `(x, y) => {
   const nonText = ["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"];
   return !nonText.includes(element.type) && !element.disabled && !element.readOnly;
 }`;
+const CSS_SIZE_READ_TIMEOUT_MS = 2_000;
 const UNATTACHED_FILL_VIEWPORT = { width: 1280, height: 800 } as const;
 const NAVIGATION_TIMEOUT_MS = 15_000;
 const VIEWER_NAVIGATION_OPTIONS = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
@@ -296,6 +297,9 @@ interface ServerTab {
   readonly isolatedContext: boolean;
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
+  /** Last good CSS size of a desktop page, which has no Playwright viewport. */
+  cssSize: { width: number; height: number } | null;
+  cssRead: Promise<void> | null;
   readonly profileId: string | undefined;
   readonly openerTabId: string | undefined;
 
@@ -597,8 +601,9 @@ const make = Effect.gen(function* () {
   };
 
   const layoutSize = (tab: ServerTab) => {
+    if (tab.desktop) return tab.cssSize;
     const size = tab.page.viewportSize();
-    if (!size || tab.desktop) return size;
+    if (!size) return size;
     return {
       width: Math.max(1, Math.round(size.width / tab.zoomFactor)),
       height: Math.max(1, Math.round(size.height / tab.zoomFactor)),
@@ -622,7 +627,38 @@ const make = Effect.gen(function* () {
     });
   };
 
+  // One read at a time; a failed or hung read keeps the last good size.
+  const refreshCssSize = (tab: ServerTab) => {
+    if (tab.cssRead) return tab.cssRead;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = Promise.race([
+      tab.page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), CSS_SIZE_READ_TIMEOUT_MS);
+      }),
+    ])
+      .then((size) => {
+        if (size && size.width > 0 && size.height > 0) {
+          tab.cssSize = { width: Math.round(size.width), height: Math.round(size.height) };
+        }
+      })
+      .catch(constVoid)
+      .finally(() => {
+        clearTimeout(timer);
+        tab.cssRead = null;
+      });
+    tab.cssRead = read;
+    return read;
+  };
+
   const broadcastViewport = (tab: ServerTab) => {
+    if (tab.desktop) {
+      void refreshCssSize(tab).then(() => {
+        const size = tab.cssSize;
+        if (size) for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
+      });
+      return;
+    }
     const size = layoutSize(tab);
     if (!size) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
@@ -777,6 +813,8 @@ const make = Effect.gen(function* () {
       },
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
+      cssSize: null,
+      cssRead: null,
       profileId: snapshot.profileId,
       openerTabId: adopted?.openerTabId,
       downloads: [],
@@ -2412,9 +2450,22 @@ const make = Effect.gen(function* () {
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss replaces its backlog. It runs
         // synchronously so an older replacement can never land after a newer one.
-        else if (next._tag === "gone" || next._tag === "control" || next._tag === "fileChooser") {
+        else if (
+          next._tag === "gone" ||
+          next._tag === "reconnect" ||
+          next._tag === "viewport" ||
+          next._tag === "control" ||
+          next._tag === "fileChooser"
+        ) {
           const dropped = Effect.runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
+          // Keep the newest pending state of the other kinds the viewer still needs.
+          const kept = new Map<string, ServerBrowserViewerOutput>();
+          for (const item of dropped.value) {
+            if (item._tag === "viewport" || item._tag === "control") kept.set(item._tag, item);
+          }
+          kept.delete(next._tag);
+          for (const item of kept.values()) Queue.offerUnsafe(output, item);
           Queue.offerUnsafe(output, next);
 
           const chooser = next._tag === "control" ? fileChooserMessage(tab) : null;
@@ -2507,6 +2558,7 @@ const make = Effect.gen(function* () {
         ),
       });
     });
+    if (tab.desktop) yield* Effect.promise(() => refreshCssSize(tab));
     broadcastViewport(tab);
     yield* Effect.promise(() => startScreencast(1));
     // An idle page does not repaint for a new screencast, so the viewer

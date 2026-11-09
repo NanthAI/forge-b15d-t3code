@@ -508,6 +508,37 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a desktop tab sends viewers its measured CSS size and keeps the last good one", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, browser } = yield* ready;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const page = desktopConnections.at(-1)!.context.page;
+      page.evaluate.mockImplementation(async () => ({ width: 412, height: 780 }) as never);
+      const viewer = yield* browser.attachViewer(viewerInput(desktopTab.tabId!, true));
+      const first = yield* Queue.takeAll(viewer.output);
+      expect(first).toContainEqual({ _tag: "viewport", width: 412, height: 780 });
+      expect(first).toContainEqual(expect.objectContaining({ _tag: "control" }));
+
+      page.evaluate.mockImplementation(async () => {
+        throw new Error("dialog open");
+      });
+      yield* viewer.input({ type: "resize", width: 390, height: 844 });
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      const second = yield* Queue.takeAll(viewer.output);
+      for (const item of second) {
+        if (item._tag === "viewport")
+          expect(item).toEqual({ _tag: "viewport", width: 412, height: 780 });
+      }
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
