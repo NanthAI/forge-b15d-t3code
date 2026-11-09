@@ -212,6 +212,13 @@ describe("server browser element refs", () => {
     expect(tree).not.toContain("PAYLOAD");
   });
 
+  it("reports a data: page's URL by media type only in a snapshot", async () => {
+    await page.goto("data:text/html,<p>SECRET-PAYLOAD</p>");
+    const snapshot = await takeSnapshot();
+    expect(snapshot.url).toBe("data:text/html,…");
+    expect(snapshot.url).not.toContain("SECRET");
+  });
+
   it("rejects refs from another tab", async () => {
     await page.setContent("<button>same label</button>");
     const locator = buttonLocator((await takeSnapshot()).accessibilityTree, "same label");
