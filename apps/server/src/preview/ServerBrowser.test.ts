@@ -508,6 +508,37 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a phone attached to a desktop tab gets the page's CSS size and keeps it when a read hangs", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, browser } = yield* ready;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const page = desktopConnections.at(-1)!.context.page;
+      page.viewportSize = () => null as never;
+      page.evaluate.mockImplementation((async () => ({ width: 390, height: 700 })) as never);
+      const viewer = yield* browser.attachViewer(viewerInput(desktopTab.tabId!, true));
+      const first = yield* Queue.takeAll(viewer.output);
+      expect(first).toContainEqual({ _tag: "viewport", width: 390, height: 700 });
+      expect(first.some((item) => item._tag === "control")).toBe(true);
+
+      // A hung read (open dialog) times out, and the last good size stays.
+      page.evaluate.mockImplementation((() => new Promise(() => {})) as never);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: {},
+      });
+      expect(status.viewport).toEqual({ width: 390, height: 700 });
+    }),
+  ).pipe(Effect.provide(layer)),
+  10_000,
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
