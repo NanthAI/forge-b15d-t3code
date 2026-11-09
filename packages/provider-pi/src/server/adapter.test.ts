@@ -167,6 +167,7 @@ interface FakePi {
   readonly deferNextModelSelection: () => void;
   readonly queueModels: (models: ReadonlyArray<unknown>) => void;
   readonly vetoNextNewSession: () => void;
+  readonly queueClearQueue: (reply: Record<string, unknown>) => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
   readonly closeStdout: Effect.Effect<void>;
@@ -208,6 +209,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let sessionGeneration = 0;
   let models: ReadonlyArray<unknown> = [];
   let isStreaming: boolean | null = null;
+  let clearQueueReply: Record<string, unknown> | undefined;
   let stdinBuffer = "";
 
   const emit = (record: PiRpcRecord, chunkBytes?: number) =>
@@ -271,6 +273,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
+      case "clear_queue":
+        return { ...base, ...clearQueueReply };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       default:
@@ -376,6 +380,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     },
     vetoNextNewSession: () => {
       vetoNewSession = true;
+    },
+    queueClearQueue: (reply) => {
+      clearQueueReply = reply;
     },
     allRequests: () => allRequests,
     vetoNextSwitch: () => {
@@ -3037,6 +3044,55 @@ describe("PiAdapterV2", () => {
       yield* fake.closeStdout;
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      name: "clears the queue",
+      reply: {
+        data: { steering: ["steer one", "   "], followUp: ["later"] },
+      },
+      notice: "Stop cleared 3 queued Pi messages that Pi had not read yet.\n- steer one\n- later",
+    },
+    {
+      name: "old Pi rejects clear_queue",
+      reply: { success: false, error: "Unknown command: clear_queue" },
+      notice: undefined,
+    },
+  ])("sends clear_queue before abort on Stop: $name", ({ reply, notice }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueClearQueue(reply);
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      const providerTurnId =
+        running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+      assert.isDefined(providerTurnId);
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
+      const types = fake.allRequests().map((request) => request["type"]);
+      assert.isBelow(types.indexOf("clear_queue"), types.indexOf("abort"));
+      assert.isAbove(types.indexOf("clear_queue"), -1);
+      if (notice !== undefined) {
+        const item = yield* takeEvent(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+        );
+        assert.isTrue(
+          item.type === "turn_item.updated" &&
+            item.turnItem.type === "system_notice" &&
+            item.turnItem.message === notice,
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
