@@ -153,6 +153,26 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       >
     | undefined => CodexRpc.CLIENT_NOTIFICATION_PARAMS[method] as never;
 
+  const warnedDecodeFailures = new Set<string>();
+  const warnNotificationDecodeFailure = (error: CodexError.CodexAppServerProtocolParseError) => {
+    const issueKinds = error.issueKinds ?? [];
+    const key = `${error.method ?? ""}\u0000${issueKinds.join(",")}`;
+    if (warnedDecodeFailures.has(key)) return Effect.void;
+    warnedDecodeFailures.add(key);
+    // Never log the payload or the error cause: they may contain message text or file contents.
+    return Effect.logWarning("Dropped a Codex App Server notification that failed to decode").pipe(
+      Effect.annotateLogs({
+        operation: error.operation,
+        ...(error.method === undefined ? {} : { method: error.method }),
+        ...(error.issueCount === undefined ? {} : { issueCount: error.issueCount }),
+        issueKinds,
+        ...(error.maximumPathDepth === undefined
+          ? {}
+          : { maximumPathDepth: error.maximumPathDepth }),
+      }),
+    );
+  };
+
   const dispatchNotification = (
     notification: CodexProtocol.CodexAppServerIncomingNotification,
   ): Effect.Effect<void, never> => {
@@ -166,6 +186,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
     if (schema) {
       return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+        Effect.tapError(warnNotificationDecodeFailure),
         Effect.flatMap((decoded) =>
           Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
         ),

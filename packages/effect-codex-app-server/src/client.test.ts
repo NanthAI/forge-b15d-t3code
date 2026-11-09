@@ -1,8 +1,11 @@
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as Queue from "effect/Queue";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
@@ -10,6 +13,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -153,6 +157,46 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       );
 
       assert.equal(initialized.userAgent, "mock-codex-app-server");
+    }),
+  );
+  it.effect("warns once about a notification that fails to decode and keeps dispatching", () =>
+    Effect.gen(function* () {
+      const warnings: Array<string> = [];
+      const logger = Logger.make(({ logLevel, message, fiber }) => {
+        if (logLevel !== "Warn") return;
+        const annotations = fiber.getRef(References.CurrentLogAnnotations);
+        warnings.push(JSON.stringify({ message: [message].flat(), annotations }));
+      });
+      const delivered = yield* Queue.unbounded<unknown>();
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const scope = yield* Scope.make();
+      const client = yield* CodexClient.make(stdio).pipe(
+        Effect.provideService(Scope.Scope, scope),
+        Effect.provide(Logger.layer([logger])),
+      );
+      yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
+        Queue.offer(delivered, payload).pipe(Effect.asVoid),
+      );
+      const sentinel = "SECRET-SENTINEL";
+      const send = (params: unknown) =>
+        Queue.offer(
+          input,
+          new TextEncoder().encode(
+            `${JSON.stringify({ method: "item/agentMessage/delta", params })}\n`,
+          ),
+        );
+      const bad = { threadId: "t", turnId: sentinel, itemId: "i" };
+      yield* send(bad);
+      yield* send(bad);
+      yield* send({ ...bad, turnId: "turn", delta: "ok" });
+      const payload = yield* Queue.take(delivered).pipe(Effect.timeout("2 seconds"));
+      assert.equal((payload as { delta: string }).delta, "ok");
+      const logged = warnings;
+      assert.equal(logged.length, 1);
+      assert.include(logged[0]!, "item/agentMessage/delta");
+      assert.include(logged[0]!, "MissingKey");
+      assert.notInclude(logged[0]!, sentinel);
+      yield* Scope.close(scope, Exit.void);
     }),
   );
 });
