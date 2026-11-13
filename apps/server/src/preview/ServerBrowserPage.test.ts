@@ -175,6 +175,16 @@ describe("server browser element refs", () => {
     expect(cut.slice(-8)).toBe("xxx•••••");
   });
 
+  it.each([
+    ["data:text/html;charset=utf-8,", encodeURIComponent],
+    ["data:text/html;base64,", (html: string) => Buffer.from(html).toString("base64")],
+  ])("redacts the snapshot page URL while keeping visible text (%s)", async (prefix, encode) => {
+    await page.goto(prefix + encode("<p>PRIVATE PAGE CONTENT</p>"));
+    const snapshot = await takeSnapshot();
+    expect(snapshot.url).toBe("data:text/html,…");
+    expect(snapshot.visibleText).toBe("PRIVATE PAGE CONTENT");
+  });
+
   it("shows a data: link or blocked data: navigation by media type only", async () => {
     // Chromium keeps raw spaces and quotes in both, so a payload can't be cut at either.
     await page.setContent(`
