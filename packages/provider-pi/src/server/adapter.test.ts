@@ -169,6 +169,7 @@ interface FakePi {
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
+  readonly queueClearResponse: (response: PiRpcRecord) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -197,6 +198,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
+  const clearResponses: Array<PiRpcRecord> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -252,6 +254,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
           };
         }
         return base;
+      case "clear_queue":
+        return { ...base, data: { steering: [], followUp: [] }, ...clearResponses.shift() };
       case "get_available_models":
         return { ...base, data: { models } };
       case "new_session": {
@@ -386,6 +390,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       isStreaming = streaming;
     },
     queueStats: (data) => statsQueue.push(data),
+    queueClearResponse: (response) => clearResponses.push(response),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -2956,6 +2961,63 @@ describe("PiAdapterV2", () => {
           terminal.failure.message === "Nothing to compact (session too small)",
       );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([true, false])(
+    "clears Pi's native queue before either Stop abort (supported: %s)",
+    (supported) =>
+      Effect.gen(function* () {
+        for (const requestRuntimeRestart of [false, true]) {
+          const fake = yield* makeFakePi;
+          const { runtime, takeEvent } = yield* openRuntime(fake);
+          const providerThread = yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          yield* startTurn(runtime, providerThread);
+          yield* fake.takeRequest("prompt");
+          const running = yield* takeEvent(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+          );
+          assert.isTrue(running.type === "provider_turn.updated");
+          if (running.type !== "provider_turn.updated") return;
+          fake.queueClearResponse(
+            supported
+              ? { data: { steering: ["Steer waiting", "  "], followUp: ["Follow-up waiting"] } }
+              : { success: false, error: "Unknown command: clear_queue" },
+          );
+          yield* runtime.interruptTurn({
+            providerThread,
+            providerTurnId: running.providerTurn.id,
+            requestRuntimeRestart,
+          });
+          assert.deepEqual(
+            fake
+              .allRequests()
+              .filter((request) => request["type"] === "clear_queue" || request["type"] === "abort")
+              .map((request) => request["type"]),
+            ["clear_queue", "abort"],
+          );
+          if (requestRuntimeRestart) yield* fake.closeStdout;
+          else yield* fake.emit({ type: "agent_settled" });
+          const notices: Array<string> = [];
+          const terminal = yield* takeEvent((event) => {
+            if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+              notices.push(event.turnItem.message);
+            }
+            return event.type === "turn.terminal";
+          });
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+          assert.deepEqual(
+            notices,
+            supported
+              ? ["Stopped before Pi read 3 queued messages:\n- Steer waiting\n- Follow-up waiting"]
+              : [],
+          );
+        }
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("restarts Pi when Stop interrupts a user compact", () =>
