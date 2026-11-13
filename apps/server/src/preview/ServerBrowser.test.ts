@@ -509,6 +509,42 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 );
 
 it.live.each([
+  { url: "data:text/html;charset=utf-8,<p>PAGE CONTENT</p>", expected: "data:text/html,…" },
+  { url: "data:text/html;base64,PHA+UEFHRSBDT05URU5UPC9wPg==", expected: "data:text/html,…" },
+  { url: "data:,PAGE CONTENT", expected: "data:,…" },
+])("redacts desktop data page URLs in load reports and status ($url)", ({ url, expected }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      yield* Effect.promise(() => desktopConnections[0]!.context.page.goto(url));
+      const loaded = yield* PubSub.take(events);
+      expect(loaded).toMatchObject({
+        type: "navigated",
+        snapshot: { navStatus: { _tag: "Success", url: expected } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe(expected);
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: expected })]);
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope: asSession("agent-b"),
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      expect(other.url).toBeNull();
+      expect(other.tabs).toContainEqual(expect.objectContaining({ tabId, url: expected }));
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
   { method: "goForward" as const, message: { type: "history", delta: 1 } },
