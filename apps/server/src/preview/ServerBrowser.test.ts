@@ -1632,6 +1632,48 @@ it.live("agents read a human's tab with no arguments and act on it only while no
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a desktop data: page reports only its media type in load and preview status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      const url = `data:text/html;charset=utf-8,<p>${"PAYLOAD".repeat(400)}</p>`;
+      yield* Effect.promise(() => page.goto(url));
+      let loaded;
+      do {
+        loaded = yield* PubSub.take(events);
+      } while (loaded.type !== "navigated" || loaded.snapshot.navStatus._tag !== "Success");
+      expect.soft(loaded.snapshot.navStatus).toMatchObject({
+        _tag: "Success",
+        url: "data:text/html,…",
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect.soft(status.url).toBe("data:text/html,…");
+      expect
+        .soft(status.tabs)
+        .toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope: asSession("agent-b"),
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      expect(other.url).toBeNull();
+      expect(other.tabs).toContainEqual(
+        expect.objectContaining({ tabId, url: "data:text/html,…" }),
+      );
+      expect(page.url()).toBe(url);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("a session's own tab stays its default while other sessions' tabs are listed", () =>
   Effect.scoped(
     Effect.gen(function* () {
