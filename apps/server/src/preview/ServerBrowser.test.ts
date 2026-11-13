@@ -527,16 +527,21 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
-it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+it.live.each([
+  ["https://example.com/loaded", "https://example.com/loaded"],
+  ['data:text/html;charset="a,b",<p>PRIVATE PAGE</p>', "data:text/html,…"],
+  ["data:text/html;base64,PHA+UFJJVkFURSBQQUdFPC9wPg==", "data:text/html,…"],
+  ["data:,PRIVATE PAGE", "data:,…"],
+] as const)("a loaded desktop page reports its title and safe URL (%s)", ([url, reportedUrl]) =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { broker } = yield* ready;
+      const { broker, tabId } = yield* ready;
       const manager = yield* Manager.PreviewManager;
       const events = yield* manager.subscribeEvents;
       desktopRendersNext = true;
       const context = (desktopContext = makeContext());
       context.page.title.mockResolvedValue("Loaded desktop page");
-      yield* Effect.promise(() => context.page.goto("https://example.com/loaded"));
+      yield* Effect.promise(() => context.page.goto(url));
 
       const opened = yield* broker.invoke<PreviewAutomationStatus>({
         scope,
@@ -547,10 +552,24 @@ it.live("a desktop page that loaded before the server attached reports its loade
       while (event.type !== "navigated" || event.tabId !== opened.tabId)
         event = yield* PubSub.take(events);
 
+      expect(opened.url).toBe(reportedUrl);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: { tabId: PreviewTabId.make(opened.tabId!) },
+      });
+      expect(status.url).toBe(reportedUrl);
+      const otherTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: { tabId },
+      });
+      expect(otherTab.tabs?.find((tab) => tab.tabId === opened.tabId)?.url).toBe(reportedUrl);
+
       const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
       expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual({
         _tag: "Success",
-        url: "https://example.com/loaded",
+        url: reportedUrl,
         title: "Loaded desktop page",
       });
     }),
