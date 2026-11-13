@@ -508,6 +508,38 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([false, true])(
+  "load reports and status redact a data: page URL (desktop: %s)",
+  (desktop) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = desktop;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const page = desktop ? desktopConnections[0]!.context.page : contexts[0]!.page;
+        yield* Effect.promise(() =>
+          page.goto(`data:text/html;charset="a,b",<p>${"PAYLOAD".repeat(500)}</p>`),
+        );
+        const event = yield* PubSub.take(events);
+        expect(event).toMatchObject({
+          type: "navigated",
+          snapshot: {
+            navStatus: { _tag: "Success", url: "data:text/html,…", title: "test page" },
+          },
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.url).toBe("data:text/html,…");
+        expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
