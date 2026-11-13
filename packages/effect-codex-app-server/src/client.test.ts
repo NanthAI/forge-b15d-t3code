@@ -11,10 +11,11 @@ import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, expect, it } from "@effect/vitest";
+import { assert, expect, it, live } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
+import * as CodexError from "./errors.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -185,6 +186,38 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       ]);
     }),
   );
+  live("reports the launcher's error when the child exits before initialize", () =>
+    Effect.gen(function* () {
+      const diagnostic =
+        "Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest";
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const handle = yield* spawner.spawn(
+        ChildProcess.make(process.execPath, [
+          "--input-type=module",
+          "-e",
+          `throw new Error(${JSON.stringify(diagnostic)})`,
+        ]),
+      );
+      const error = yield* Effect.gen(function* () {
+        const client = yield* CodexClient.CodexAppServerClient;
+        return yield* Effect.flip(
+          client.request("initialize", {
+            clientInfo: { name: "test", title: "Test", version: "0.0.0" },
+            capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+          }),
+        );
+      }).pipe(Effect.provide(CodexClient.layerChildProcess(handle)));
+
+      assert.instanceOf(error, CodexError.CodexAppServerProcessExitedError);
+      assert.equal(error.code, 1);
+      assert.equal(error.stderr, `Error: ${diagnostic}`);
+      assert.equal(
+        error.message,
+        `Codex App Server process exited with code 1: Error: ${diagnostic}`,
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("drains child stderr so large diagnostics cannot block protocol responses", () =>
     Effect.gen(function* () {
       const handle = yield* makeHandle({

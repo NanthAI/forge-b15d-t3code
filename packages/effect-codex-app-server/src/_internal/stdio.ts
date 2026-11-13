@@ -1,5 +1,7 @@
+import { stripVTControlCharacters } from "node:util";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
@@ -49,15 +51,58 @@ type ChildProcessTerminationHandle = Pick<
   "exitCode" | "pid"
 >;
 
+export const makeStderrCapture = Effect.fn("makeStderrCapture")(function* (
+  stderr: ChildProcessSpawner.ChildProcessHandle["stderr"],
+) {
+  let tail = new Uint8Array(0);
+  const fiber = yield* Stream.runForEach(stderr, (chunk) =>
+    Effect.sync(() => {
+      const incoming = chunk.subarray(-8192);
+      const retained = tail.subarray(Math.max(0, tail.length + incoming.length - 8192));
+      tail = new Uint8Array(retained.length + incoming.length);
+      tail.set(retained);
+      tail.set(incoming, retained.length);
+    }),
+  ).pipe(Effect.ignore, Effect.forkScoped);
+
+  return {
+    fiber,
+    excerpt: () => {
+      const lines = stripVTControlCharacters(new TextDecoder().decode(tail))
+        .split(/\r\n|\r|\n/)
+        .map((line) => line.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      const line =
+        lines.findLast((line) => /^(?:[\w.]*Error(?: \[ERR_[^\]]+\])?|error|fatal):/.test(line)) ??
+        lines.at(-1);
+      return line?.slice(0, 512);
+    },
+  };
+});
+
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
+  stderr?: { readonly fiber: Fiber.Fiber<void>; readonly excerpt: () => string | undefined },
 ): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
+  Effect.matchEffect(handle.exitCode, {
     onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
+      Effect.succeed(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-process-exit-status",
+          pid: handle.pid,
+          cause,
+        }),
+      ),
+    onSuccess: Effect.fn("makeTerminationError")(function* (code) {
+      if (stderr) {
+        // Descendants can keep stderr open after the app-server exits.
+        yield* Fiber.await(stderr.fiber).pipe(Effect.timeoutOption("250 millis"));
+      }
+      const excerpt = stderr?.excerpt();
+      return new CodexError.CodexAppServerProcessExitedError({
+        code,
         pid: handle.pid,
-        cause,
-      }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
+        ...(excerpt ? { stderr: excerpt } : {}),
+      });
+    }),
   });
