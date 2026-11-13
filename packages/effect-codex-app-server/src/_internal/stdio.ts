@@ -5,6 +5,7 @@ import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
+import * as NodeUtil from "node:util";
 
 import * as CodexError from "../errors.ts";
 
@@ -44,6 +45,29 @@ export const makeInMemoryStdio = Effect.fn("makeInMemoryStdio")(function* () {
   };
 });
 
+export const makeStderrTail = () => {
+  let tail = new Uint8Array(0);
+  return {
+    append: (chunk: Uint8Array) => {
+      const next = new Uint8Array(Math.min(8192, tail.length + chunk.length));
+      const retained = Math.max(0, next.length - chunk.length);
+      next.set(tail.subarray(tail.length - retained));
+      next.set(chunk.subarray(Math.max(0, chunk.length - next.length)), retained);
+      tail = next;
+    },
+    excerpt: () => {
+      const lines = NodeUtil.stripVTControlCharacters(new TextDecoder().decode(tail))
+        .split(/[\r\n]+/)
+        .map((line) => line.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      const line =
+        lines.findLast((line) => /^(?:[\w.]*Error(?: \[[^\]]+\])?|error|fatal):/.test(line)) ??
+        lines.at(-1);
+      return line?.slice(0, 512);
+    },
+  };
+};
+
 type ChildProcessTerminationHandle = Pick<
   ChildProcessSpawner.ChildProcessHandle,
   "exitCode" | "pid"
@@ -51,13 +75,31 @@ type ChildProcessTerminationHandle = Pick<
 
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
+  stderr?: {
+    readonly done: Effect.Effect<unknown>;
+    readonly excerpt: () => string | undefined;
+  },
 ): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
+  Effect.matchEffect(handle.exitCode, {
     onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
+      Effect.succeed(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-process-exit-status",
+          pid: handle.pid,
+          cause,
+        }),
+      ),
+    onSuccess: Effect.fn("makeTerminationError.onExit")(function* (code) {
+      if (stderr) {
+        yield* stderr.done.pipe(
+          Effect.timeoutOrElse({ duration: "250 millis", orElse: () => Effect.void }),
+        );
+      }
+      const excerpt = stderr?.excerpt();
+      return new CodexError.CodexAppServerProcessExitedError({
+        code,
         pid: handle.pid,
-        cause,
-      }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
+        ...(excerpt ? { stderr: excerpt } : {}),
+      });
+    }),
   });
