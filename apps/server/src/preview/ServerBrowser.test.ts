@@ -59,6 +59,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
       context.page.viewportSize.mockReturnValue(null);
+      if (desktopLoadedUrl) await context.page.goto(desktopLoadedUrl);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -287,6 +288,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopLoadedUrl: string | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -399,6 +401,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopLoadedUrl = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -509,6 +512,80 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      desktopLoadedUrl = "https://example.com/loaded";
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { url: "https://example.com/redirect", reuseExistingTab: false, show: false },
+      });
+      expect(opened).toMatchObject({ url: desktopLoadedUrl, title: "test page", loading: false });
+      let event;
+      do {
+        event = yield* PubSub.take(events);
+      } while (event.type !== "navigated" || event.tabId !== opened.tabId);
+      const navStatus = { _tag: "Success", url: desktopLoadedUrl, title: "test page" };
+      expect(event.snapshot.navStatus).toEqual(navStatus);
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual(
+        navStatus,
+      );
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("redacts data page URLs in load reports and preview status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      const url = `data:text/html;charset=utf-8,<p>${"PAYLOAD".repeat(400)}</p>`;
+      yield* Effect.promise(() => page.goto(url));
+      const loaded = yield* PubSub.take(events);
+      expect(loaded).toMatchObject({
+        type: "navigated",
+        tabId: desktopTab.tabId,
+        snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(desktopTab.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(other.url).toBeNull();
+      expect(other.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ tabId, url: null }),
+          expect.objectContaining({ tabId: desktopTab.tabId, url: "data:text/html,…" }),
+        ]),
+      );
+      expect(page.url()).toBe(url);
     }),
   ).pipe(Effect.provide(layer)),
 );

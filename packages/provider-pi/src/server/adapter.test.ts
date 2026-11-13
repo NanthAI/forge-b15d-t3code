@@ -169,6 +169,7 @@ interface FakePi {
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
+  readonly queueClearQueueResponse: (response: PiRpcRecord) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -197,6 +198,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
+  const clearQueueResponses: Array<PiRpcRecord> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -271,6 +273,12 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
+      case "clear_queue":
+        return {
+          ...base,
+          data: { steering: [], followUp: [] },
+          ...clearQueueResponses.shift(),
+        };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       default:
@@ -386,6 +394,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       isStreaming = streaming;
     },
     queueStats: (data) => statsQueue.push(data),
+    queueClearQueueResponse: (response) => clearQueueResponses.push(response),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -1983,6 +1992,75 @@ describe("PiAdapterV2", () => {
         .map((request) => request.entryId);
       // Pi keeps only the fork entry's ancestors, so u2 (not steer2) drops all of turn 2.
       assert.deepEqual(forkedEntries, ["u2"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      for (const call of [
+        { toolCallId: "call_code", toolName: "code", parentToolCallId: undefined },
+        { toolCallId: "call_code/1", toolName: "read", parentToolCallId: "call_code" },
+        { toolCallId: "opaque-id", toolName: "bash", parentToolCallId: "call_code" },
+        { toolCallId: "failed-edit", toolName: "edit", parentToolCallId: "call_code/1" },
+        { toolCallId: "update-first", toolName: "write", parentToolCallId: "late-caller" },
+        { toolCallId: "top-level/1", toolName: "read", parentToolCallId: undefined },
+      ]) {
+        const phases =
+          call.toolCallId === "update-first"
+            ? ["update", "start", "end"]
+            : ["start", "update", "end"];
+        for (const phase of phases) {
+          const status =
+            phase === "end"
+              ? call.toolCallId === "failed-edit"
+                ? "failed"
+                : "completed"
+              : "running";
+          yield* fake.emit({
+            type: `tool_execution_${phase}`,
+            ...call,
+            args: { command: "pwd", path: "a.ts", content: "hello" },
+            partialResult: { content: [{ type: "text", text: "working" }] },
+            result: { content: [{ type: "text", text: "done" }] },
+            isError: call.toolCallId === "failed-edit",
+          });
+          const node = yield* takeEvent((event) => event.type === "node.updated");
+          if (node.type !== "node.updated") return yield* Effect.die("Expected a tool node");
+          assert.equal(
+            node.node.id,
+            `node:provider:pi:native-item:${encodeURIComponent(call.toolCallId)}`,
+          );
+          assert.equal(
+            node.node.parentNodeId,
+            call.parentToolCallId === undefined
+              ? "node:run:thread-pi-test:1:root"
+              : `node:provider:pi:native-item:${encodeURIComponent(call.parentToolCallId)}`,
+          );
+          assert.equal(node.node.rootNodeId, "node:run:thread-pi-test:1:root");
+          assert.equal(node.node.status, status);
+          const item = yield* takeEvent((event) => event.type === "turn_item.updated");
+          if (item.type !== "turn_item.updated") return yield* Effect.die("Expected a tool item");
+          assert.equal(item.turnItem.nodeId, node.node.id);
+          assert.equal(
+            item.turnItem.parentItemId,
+            call.parentToolCallId === undefined
+              ? null
+              : `turn-item:provider:pi:native-item:${encodeURIComponent(call.parentToolCallId)}`,
+          );
+          assert.equal(item.turnItem.status, status);
+        }
+      }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -3873,6 +3951,63 @@ describe("PiAdapterV2", () => {
       yield* fake.emit({ type: "agent_settled" });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([true, false])("clears Pi's native queue before Stop, supported=%s", (supported) =>
+    Effect.gen(function* () {
+      for (const requestRuntimeRestart of [false, true]) {
+        const fake = yield* makeFakePi;
+        fake.queueClearQueueResponse(
+          supported
+            ? { data: { steering: ["Steer text", "  "], followUp: ["Follow-up text"] } }
+            : { success: false, error: "Unknown command: clear_queue" },
+        );
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        const runningTurn = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        assert(runningTurn.type === "provider_turn.updated");
+        yield* runtime.interruptTurn({
+          providerThread,
+          providerTurnId: runningTurn.providerTurn.id,
+          requestRuntimeRestart,
+        });
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .flatMap((request) =>
+              request["type"] === "clear_queue" || request["type"] === "abort"
+                ? [request["type"]]
+                : [],
+            ),
+          ["clear_queue", "abort"],
+        );
+        if (!requestRuntimeRestart) yield* fake.emit({ type: "agent_settled" });
+        const notices: Array<string> = [];
+        const terminal = yield* takeEvent((event) => {
+          if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+            notices.push(event.turnItem.message);
+          }
+          return event.type === "turn.terminal";
+        });
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+        assert.deepEqual(
+          notices,
+          supported
+            ? ["Stopped before Pi read 3 queued messages:\n\n- Steer text\n- Follow-up text"]
+            : [],
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
