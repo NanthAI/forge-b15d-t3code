@@ -80,6 +80,7 @@ import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as PreviewManager from "./Manager.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+import { ServerBrowserViewport } from "./ServerBrowserViewport.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
@@ -281,6 +282,7 @@ interface ServerTab {
   readonly tabId: string;
   readonly page: Page;
   readonly cdp: CDPSession;
+  readonly desktopViewport: ServerBrowserViewport | null;
   readonly frameSessions: Map<Frame, CDPSession>;
   readonly createdAt: number;
   usedAt: number;
@@ -596,6 +598,9 @@ const make = Effect.gen(function* () {
     );
   };
 
+  const readLayoutSize = async (tab: ServerTab) =>
+    tab.desktopViewport ? tab.desktopViewport.read() : layoutSize(tab);
+
   const layoutSize = (tab: ServerTab) => {
     const size = tab.page.viewportSize();
     if (!size || tab.desktop) return size;
@@ -622,8 +627,8 @@ const make = Effect.gen(function* () {
     });
   };
 
-  const broadcastViewport = (tab: ServerTab) => {
-    const size = layoutSize(tab);
+  const broadcastViewport = async (tab: ServerTab) => {
+    const size = await readLayoutSize(tab);
     if (!size) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
   };
@@ -641,7 +646,7 @@ const make = Effect.gen(function* () {
       UNATTACHED_FILL_VIEWPORT;
     await tab.page.setViewportSize({ width: size.width, height: size.height });
     await applyZoom(tab);
-    broadcastViewport(tab);
+    await broadcastViewport(tab);
   };
 
   const applyRendering = async (tab: ServerTab, snapshot: PreviewSessionSnapshot) => {
@@ -654,7 +659,7 @@ const make = Effect.gen(function* () {
     if (zoomFactor !== tab.zoomFactor && !tab.desktop) {
       tab.zoomFactor = zoomFactor;
       await applyZoom(tab);
-      broadcastViewport(tab);
+      await broadcastViewport(tab);
     }
   };
 
@@ -760,6 +765,11 @@ const make = Effect.gen(function* () {
       tabId: snapshot.tabId,
       page,
       cdp,
+      desktopViewport: desktop
+        ? new ServerBrowserViewport(cdp, (size) => {
+            for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
+          })
+        : null,
       frameSessions: new Map(),
       createdAt: Date.now(),
       usedAt: Date.now(),
@@ -1488,7 +1498,9 @@ const make = Effect.gen(function* () {
       };
     }
     const url = tab.page.url();
-    const viewport = tab.page.viewportSize();
+    const viewport = tab.desktopViewport
+      ? await tab.desktopViewport.read()
+      : tab.page.viewportSize();
     const status = {
       available: true,
       visible: tab.viewers.size > 0,
@@ -2067,7 +2079,9 @@ const make = Effect.gen(function* () {
         return {
           tabId: tab.tabId,
           setting,
-          viewport: tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT,
+          viewport:
+            (tab.desktopViewport ? await tab.desktopViewport.read() : tab.page.viewportSize()) ??
+            UNATTACHED_FILL_VIEWPORT,
         };
       }
       case "setColorScheme": {
@@ -2311,11 +2325,15 @@ const make = Effect.gen(function* () {
         const height = Math.min(Math.round(num(message.height)), 2160);
         if (width < 100 || height < 100) return;
         viewer.requestedSize = { width, height, order: ++viewerResizeOrder };
-        if (tab.setting._tag !== "fill" || tab.desktop) return;
+        if (tab.desktop) {
+          await broadcastViewport(tab);
+          return;
+        }
+        if (tab.setting._tag !== "fill") return;
         const current = tab.page.viewportSize();
         if (current?.width === width && current.height === height) return;
         await tab.page.setViewportSize({ width, height });
-        broadcastViewport(tab);
+        await broadcastViewport(tab);
         return;
       }
       case "viewport": {
@@ -2406,23 +2424,37 @@ const make = Effect.gen(function* () {
       });
       return screencastParams;
     };
+    let latestViewport: Extract<ServerBrowserViewerOutput, { _tag: "viewport" }> | null = null;
+    let latestControl: Extract<ServerBrowserViewerOutput, { _tag: "control" }> | null = null;
     const viewer: ViewerState = {
       id: NodeCrypto.randomUUID(),
       canOperate: input.canOperate,
       pressedKeys: new Map(),
       pressedButtons: new Map(),
       push: (next) => {
+        if (next._tag === "viewport") {
+          if (latestViewport?.width === next.width && latestViewport.height === next.height) return;
+          latestViewport = next;
+        } else if (next._tag === "control") latestControl = next;
         // Dropped frames must still release Chromium.
         if (Queue.offerUnsafe(output, next)) return;
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss replaces its backlog. It runs
         // synchronously so an older replacement can never land after a newer one.
-        else if (next._tag === "gone" || next._tag === "control" || next._tag === "fileChooser") {
+        else if (
+          next._tag === "gone" ||
+          next._tag === "reconnect" ||
+          next._tag === "viewport" ||
+          next._tag === "control" ||
+          next._tag === "fileChooser"
+        ) {
           const dropped = Effect.runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
-          Queue.offerUnsafe(output, next);
+          if (latestViewport) Queue.offerUnsafe(output, latestViewport);
+          if (latestControl) Queue.offerUnsafe(output, latestControl);
+          if (next._tag !== "viewport" && next._tag !== "control") Queue.offerUnsafe(output, next);
 
-          const chooser = next._tag === "control" ? fileChooserMessage(tab) : null;
+          const chooser = next._tag !== "fileChooser" ? fileChooserMessage(tab) : null;
           if (chooser && tab.control.controller === viewer.id) Queue.offerUnsafe(output, chooser);
           for (const item of dropped.value) if (item._tag === "frame") runFork(item.ack);
         }
@@ -2470,6 +2502,7 @@ const make = Effect.gen(function* () {
     let screencastStarted = false;
     session.on("Page.screencastFrame", (frame) => {
       screencastStarted = true;
+      if (tab.desktop) void broadcastViewport(tab);
       if (framesInFlight > 0) mayHaveDropped = true;
       framesInFlight += 1;
       const arrivedAt = Date.now();
@@ -2512,11 +2545,16 @@ const make = Effect.gen(function* () {
         ),
       });
     });
-    broadcastViewport(tab);
-    yield* Effect.promise(() => startScreencast(1));
-    // An idle page does not repaint for a new screencast, so the viewer
-    // starts from a still unless a live frame beat it.
-    if (!screencastStarted) yield* Effect.promise(pushStill);
+    yield* Effect.promise(() => broadcastViewport(tab));
+    const start = Effect.gen(function* () {
+      yield* Effect.promise(() => startScreencast(1));
+      // An idle page does not repaint for a new screencast, so the viewer
+      // starts from a still unless a live frame beat it.
+      if (!screencastStarted) yield* Effect.promise(pushStill);
+    });
+    // A dialog stalls screencast startup; return the controls needed to dismiss it.
+    if (tab.dialog) yield* start.pipe(Effect.forkScoped);
+    else yield* start;
     return {
       output,
       input: (raw: unknown) =>
