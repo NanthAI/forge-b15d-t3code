@@ -80,6 +80,7 @@ import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as PreviewManager from "./Manager.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+import { withoutDataPayload } from "./PreviewUrl.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
@@ -97,6 +98,7 @@ const SCREENCAST_MOTION_QUALITY = 50;
 const HOST_RECONNECT_DELAY = "1 second";
 const DESKTOP_ATTACH_TIMEOUT = "10 seconds";
 const VIEWER_OUTPUT_LIMIT = 64;
+const VIEWPORT_READ_TIMEOUT_MS = 2_000;
 const RECORDING_SCREENCAST = { format: "jpeg", quality: 90, everyNthFrame: 1 } as const;
 const decodeViewportSetting = Schema.decodeUnknownSync(PreviewViewportSettingSchema);
 const AGENT_CURSOR_MOVE_MS = 160;
@@ -310,6 +312,8 @@ interface ServerTab {
   setting: PreviewViewportSetting;
   colorScheme: PreviewAppearancePreference;
   zoomFactor: number;
+  cssViewport: { width: number; height: number } | null;
+  viewportRead: Promise<void> | null;
   loading: boolean;
   closing: boolean;
   recording: Recording | null;
@@ -514,23 +518,24 @@ const make = Effect.gen(function* () {
     else tab.page.off("filechooser", tab.onFileChooser);
   };
 
+  const controlMessage = (tab: ServerTab, viewer: ViewerState): ServerBrowserViewerOutput => ({
+    _tag: "control",
+    canOperate: viewer.canOperate,
+    controller:
+      tab.control.controller === viewer.id
+        ? "you"
+        : tab.control.controller !== null
+          ? "another-viewer"
+          : tab.control.agentId !== null
+            ? "agent"
+            : "unclaimed",
+    generation: tab.control.generation,
+    dialog: dialogStatus(tab),
+  });
+
   const broadcastControl = (tab: ServerTab) => {
     updateFileChooserInterception(tab);
-    for (const viewer of tab.viewers)
-      viewer.push({
-        _tag: "control",
-        canOperate: viewer.canOperate,
-        controller:
-          tab.control.controller === viewer.id
-            ? "you"
-            : tab.control.controller !== null
-              ? "another-viewer"
-              : tab.control.agentId !== null
-                ? "agent"
-                : "unclaimed",
-        generation: tab.control.generation,
-        dialog: dialogStatus(tab),
-      });
+    for (const viewer of tab.viewers) viewer.push(controlMessage(tab, viewer));
   };
 
   const resolveDialog = async (tab: ServerTab, input: PreviewAutomationDialogInput) => {
@@ -571,7 +576,7 @@ const make = Effect.gen(function* () {
     if (url === "about:blank" || url.startsWith("chrome-error://")) return;
     const title = (await tab.page.title().catch(() => "")).slice(0, 512);
     if (tab.loading || tab.page.url() !== url) return;
-    report(tab, { _tag: "Success", url: url.slice(0, 2048), title });
+    report(tab, { _tag: "Success", url: withoutDataPayload(url).slice(0, 2048), title });
   };
 
   const reportLiveTabs = () => {
@@ -598,7 +603,8 @@ const make = Effect.gen(function* () {
 
   const layoutSize = (tab: ServerTab) => {
     const size = tab.page.viewportSize();
-    if (!size || tab.desktop) return size;
+    if (tab.desktop) return tab.cssViewport;
+    if (!size) return size;
     return {
       width: Math.max(1, Math.round(size.width / tab.zoomFactor)),
       height: Math.max(1, Math.round(size.height / tab.zoomFactor)),
@@ -626,6 +632,36 @@ const make = Effect.gen(function* () {
     const size = layoutSize(tab);
     if (!size) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
+  };
+
+  const readViewport = async (tab: ServerTab) => {
+    if (!tab.desktop) return tab.page.viewportSize();
+    if (!tab.viewportRead) {
+      // A dialog can stall CDP. Keep the read in flight after the wait expires so frames
+      // and other viewers cannot pile more requests onto the blocked page.
+      const read = ServerBrowserPage.readPageMetrics(tab.cdp)
+        .then(({ width, height }) => {
+          if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0)
+            return;
+          if (tab.closing) return;
+          const previous = tab.cssViewport;
+          tab.cssViewport = { width, height };
+          if (previous?.width !== width || previous.height !== height) broadcastViewport(tab);
+        })
+        .catch(constVoid);
+      let timer: ReturnType<typeof setTimeout>;
+      tab.viewportRead = Promise.race([
+        read,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, VIEWPORT_READ_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      void read.finally(() => {
+        tab.viewportRead = null;
+      });
+    }
+    await tab.viewportRead;
+    return tab.cssViewport;
   };
 
   const applySetting = async (tab: ServerTab, setting: PreviewViewportSetting) => {
@@ -785,6 +821,8 @@ const make = Effect.gen(function* () {
       setting: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
       colorScheme: "system",
       zoomFactor: 1,
+      cssViewport: null,
+      viewportRead: null,
       loading: false,
       closing: false,
       recording: null,
@@ -809,7 +847,7 @@ const make = Effect.gen(function* () {
       tab.loading = true;
       report(tab, {
         _tag: "Loading",
-        url: ServerBrowserPage.withoutDataPayload(request.url()).slice(0, 2048),
+        url: withoutDataPayload(request.url()).slice(0, 2048),
         title: "",
       });
     });
@@ -840,7 +878,7 @@ const make = Effect.gen(function* () {
     page.on("requestfailed", (request) => {
       const errorText = request.failure()?.errorText ?? "";
       pushBounded(tab.networkEntries, {
-        url: ServerBrowserPage.withoutDataPayload(request.url()),
+        url: withoutDataPayload(request.url()),
         method: request.method(),
         status: null,
         failed: true,
@@ -871,7 +909,7 @@ const make = Effect.gen(function* () {
       const { code, description } = ServerBrowserPage.parseNetError(errorText);
       report(tab, {
         _tag: "LoadFailed",
-        url: ServerBrowserPage.withoutDataPayload(request.url()).slice(0, 2048),
+        url: withoutDataPayload(request.url()).slice(0, 2048),
         title: "",
         code,
         description,
@@ -879,7 +917,7 @@ const make = Effect.gen(function* () {
     });
     page.on("response", (response) => {
       pushBounded(tab.networkEntries, {
-        url: ServerBrowserPage.withoutDataPayload(response.url()),
+        url: withoutDataPayload(response.url()),
         method: response.request().method(),
         status: response.status(),
         failed: false,
@@ -967,7 +1005,7 @@ const make = Effect.gen(function* () {
     }
     report(tab, {
       _tag: "LoadFailed",
-      url: ServerBrowserPage.withoutDataPayload(url).slice(0, 2048),
+      url: withoutDataPayload(url).slice(0, 2048),
       title: "",
       code: -3,
       description: "ERR_ABORTED",
@@ -1000,7 +1038,7 @@ const make = Effect.gen(function* () {
         fileName: download.suggestedFilename().slice(0, 255) || "download",
         path,
         sizeBytes: size,
-        url: ServerBrowserPage.withoutDataPayload(download.url()).slice(0, 2048),
+        url: withoutDataPayload(download.url()).slice(0, 2048),
         completedAt: new Date().toISOString(),
       };
       tab.downloads.push(saved);
@@ -1490,12 +1528,12 @@ const make = Effect.gen(function* () {
       };
     }
     const url = tab.page.url();
-    const viewport = tab.page.viewportSize();
+    const viewport = await readViewport(tab);
     const status = {
       available: true,
       visible: tab.viewers.size > 0,
       tabId: tab.tabId,
-      url: url === "about:blank" ? null : url,
+      url: url === "about:blank" ? null : withoutDataPayload(url),
       title: null,
       loading: tab.loading,
       control: {
@@ -1513,7 +1551,10 @@ const make = Effect.gen(function* () {
         .filter((candidate) => candidate.threadId === tab.threadId)
         .map((candidate) => ({
           tabId: candidate.tabId,
-          url: candidate.page.url() === "about:blank" ? null : candidate.page.url(),
+          url:
+            candidate.page.url() === "about:blank"
+              ? null
+              : withoutDataPayload(candidate.page.url()),
           ...(candidate.openerTabId === undefined ? {} : { openerTabId: candidate.openerTabId }),
           owner: tabOwner(candidate),
           ownedByCaller: candidate.control.agentId === agentSessionId,
@@ -2069,7 +2110,7 @@ const make = Effect.gen(function* () {
         return {
           tabId: tab.tabId,
           setting,
-          viewport: tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT,
+          viewport: (await readViewport(tab)) ?? UNATTACHED_FILL_VIEWPORT,
         };
       }
       case "setColorScheme": {
@@ -2419,13 +2460,21 @@ const make = Effect.gen(function* () {
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss replaces its backlog. It runs
         // synchronously so an older replacement can never land after a newer one.
-        else if (next._tag === "gone" || next._tag === "control" || next._tag === "fileChooser") {
+        else if (
+          next._tag === "gone" ||
+          next._tag === "reconnect" ||
+          next._tag === "viewport" ||
+          next._tag === "control" ||
+          next._tag === "fileChooser"
+        ) {
           const dropped = Effect.runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
-          Queue.offerUnsafe(output, next);
-
-          const chooser = next._tag === "control" ? fileChooserMessage(tab) : null;
+          const size = layoutSize(tab);
+          if (size) Queue.offerUnsafe(output, { _tag: "viewport", ...size });
+          Queue.offerUnsafe(output, controlMessage(tab, viewer));
+          const chooser = fileChooserMessage(tab);
           if (chooser && tab.control.controller === viewer.id) Queue.offerUnsafe(output, chooser);
+          if (next._tag === "gone" || next._tag === "reconnect") Queue.offerUnsafe(output, next);
           for (const item of dropped.value) if (item._tag === "frame") runFork(item.ack);
         }
       },
@@ -2472,6 +2521,7 @@ const make = Effect.gen(function* () {
     let screencastStarted = false;
     session.on("Page.screencastFrame", (frame) => {
       screencastStarted = true;
+      if (tab.desktop) void readViewport(tab);
       if (framesInFlight > 0) mayHaveDropped = true;
       framesInFlight += 1;
       const arrivedAt = Date.now();
@@ -2514,6 +2564,7 @@ const make = Effect.gen(function* () {
         ),
       });
     });
+    yield* Effect.promise(() => readViewport(tab));
     broadcastViewport(tab);
     yield* Effect.promise(() => startScreencast(1));
     // An idle page does not repaint for a new screencast, so the viewer
