@@ -127,6 +127,7 @@ export class ForgejoCli extends Context.Service<
     readonly execute: (input: {
       readonly command?: "fj" | "tea";
       readonly cwd: string;
+      readonly spawnCwd?: string;
       readonly args: ReadonlyArray<string>;
       readonly stdin?: string;
       readonly timeoutMs?: number;
@@ -433,7 +434,13 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const cached = authenticated.get(login.url);
     if (token && cached?.token === token && now - cached.time < 30_000) return token;
-    yield* execute({ command: "fj", cwd, args: ["--host", login.url, "whoami"] });
+    // fj inspects the working repository even with --host and fails on unborn branches.
+    yield* execute({
+      command: "fj",
+      cwd,
+      spawnCwd: yield* HostProcess.HomeDirectory,
+      args: ["--host", login.url, "whoami"],
+    });
     // fj owns OAuth renewal. Re-read the file after it has refreshed an expired token.
     const refreshed = (yield* readKeys(cwd)).hosts[login.name]?.token;
     if (!refreshed)
