@@ -444,6 +444,39 @@ const readPageMetrics = async (cdp: CDPSession) => {
   );
 };
 
+/** A dialog can stall CDP evaluation; callers share one read and keep the last usable size. */
+export const createViewportReader = (
+  cdp: CDPSession,
+  onSize?: (size: NonNullable<ReturnType<Page["viewportSize"]>>) => void,
+) => {
+  let lastGood: ReturnType<Page["viewportSize"]> = null;
+  let pending: Promise<ReturnType<Page["viewportSize"]>> | null = null;
+  return () => {
+    if (pending) return pending;
+    const read = readPageMetrics(cdp).then(
+      ({ width, height }) => {
+        if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+          lastGood = { width, height };
+          onSize?.(lastGood);
+        }
+        return lastGood;
+      },
+      () => lastGood,
+    );
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<ReturnType<Page["viewportSize"]>>((resolve) => {
+      timer = setTimeout(() => resolve(lastGood), 2_000);
+    });
+    pending = Promise.race([read, deadline]);
+    // Keep the flight occupied after the deadline until CDP actually settles.
+    void read.then(() => {
+      clearTimeout(timer);
+      pending = null;
+    });
+    return pending;
+  };
+};
+
 // Never pass a clip scale: Chromium mirrors the top-left of the page into a `backdrop-filter`
 // in any capture it shrinks.
 export const captureViewport = async (

@@ -5,7 +5,16 @@ import {
   type CDPSession,
   type Page,
 } from "playwright-core";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vite-plus/test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vite-plus/test";
 
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 
@@ -242,6 +251,114 @@ describe("server browser element refs", () => {
     );
     await ServerBrowserPage.click(page, { selector: 'button[data-example=" >> aria-ref=e1"]' });
     expect(await page.locator("button").textContent()).toBe("saved");
+  });
+});
+
+describe("desktop viewport reads", () => {
+  it("shares a pending read, retains good CSS dimensions on failure, and recovers after a stall", async () => {
+    using timers = (() => {
+      vi.useFakeTimers();
+      return { [Symbol.dispose]: () => vi.useRealTimers() };
+    })();
+    const stalled = Promise.withResolvers<{ result: { value: unknown } }>();
+    let evaluation: () => Promise<{ result: { value: unknown } }> = async () => ({
+      result: { value: { ratio: 3, width: 800, height: 600 } },
+    });
+    const send = vi.fn(async (method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { zoom: 1.5 } };
+      if (method === "Runtime.evaluate") return evaluation();
+      throw new Error(method);
+    });
+    const onSize = vi.fn();
+    const read = ServerBrowserPage.createViewportReader({ send } as unknown as CDPSession, onSize);
+    const first = read();
+    expect(read()).toBe(first);
+    expect(await first).toEqual({ width: 800, height: 600 });
+    for (const value of [null, { width: 0, height: 600 }, { width: 800, height: NaN }]) {
+      evaluation = async () => ({ result: { value } });
+      expect(await read()).toEqual({ width: 800, height: 600 });
+    }
+    evaluation = async () => {
+      throw new Error("navigating");
+    };
+    expect(await read()).toEqual({ width: 800, height: 600 });
+    evaluation = () => stalled.promise;
+    const pending = read();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await pending).toEqual({ width: 800, height: 600 });
+    const calls = send.mock.calls.length;
+    expect(read()).toBe(pending);
+    expect(read()).toBe(pending);
+    expect(send.mock.calls).toHaveLength(calls);
+    onSize.mockClear();
+    stalled.resolve({ result: { value: { ratio: 2, width: 900, height: 700 } } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSize).toHaveBeenCalledExactlyOnceWith({ width: 900, height: 700 });
+    evaluation = async () => {
+      throw new Error("navigating again");
+    };
+    expect(await read()).toEqual({ width: 900, height: 700 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("delivers an initial size when a dialog-blocked read settles after the viewer attached", async () => {
+    using timers = (() => {
+      vi.useFakeTimers();
+      return { [Symbol.dispose]: () => vi.useRealTimers() };
+    })();
+    const blocked = Promise.withResolvers<Record<string, unknown>>();
+    const send = vi.fn(async (method: string): Promise<Record<string, unknown>> => {
+      if (method === "Page.getFrameTree") return blocked.promise;
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { zoom: 1 } };
+      return { result: { value: { ratio: 2, width: 900, height: 700 } } };
+    });
+    const onSize = vi.fn();
+    const read = ServerBrowserPage.createViewportReader({ send } as unknown as CDPSession, onSize);
+    const first = read();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await first).toBeNull();
+    expect(read()).toBe(first);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(onSize).not.toHaveBeenCalled();
+    blocked.resolve({ frameTree: { frame: { id: "main" } } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSize).toHaveBeenCalledExactlyOnceWith({ width: 900, height: 700 });
+    expect(await read()).toEqual({ width: 900, height: 700 });
+  });
+
+  it("recovers CSS dimensions after attaching to a desktop page with an open dialog", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const context = await browser.newContext({ viewport: null });
+      const page = await context.newPage();
+      const cdp = await context.newCDPSession(page);
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 900,
+        height: 700,
+        deviceScaleFactor: 2,
+        mobile: false,
+      });
+      await page.setContent(`<script>
+        Object.defineProperty(window, "innerWidth", { value: 1 });
+        Object.defineProperty(window, "innerHeight", { value: 1 });
+      </script>`);
+      expect(page.viewportSize()).toBeNull();
+      const opened = Promise.withResolvers<import("playwright-core").Dialog>();
+      page.once("dialog", opened.resolve);
+      const alert = page.evaluate("alert('pause')");
+      const dialog = await opened.promise;
+      const delivered = Promise.withResolvers<{ width: number; height: number }>();
+      const read = ServerBrowserPage.createViewportReader(cdp, delivered.resolve);
+      expect(await read()).toBeNull();
+      await dialog.dismiss();
+      await alert;
+      expect(await delivered.promise).toEqual({ width: 900, height: 700 });
+    } finally {
+      await browser.close();
+    }
   });
 });
 
