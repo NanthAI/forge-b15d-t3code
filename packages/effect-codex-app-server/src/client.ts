@@ -1,7 +1,9 @@
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
@@ -18,7 +20,7 @@ import {
   encodeOptionalPayload,
   runHandler,
 } from "./_internal/shared.ts";
-import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+import { appendStderrTail, makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -306,6 +308,13 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  const stderrTail = yield* Ref.make<Uint8Array>(new Uint8Array());
+  const stderrFiber = yield* Stream.runForEach(handle.stderr, (chunk) =>
+    Ref.update(stderrTail, (tail) => appendStderrTail(tail, chunk)),
+  ).pipe(Effect.ignore, Effect.forkScoped);
+  return yield* make(
+    makeChildStdio(handle),
+    options,
+    makeTerminationError(handle, { done: Fiber.join(stderrFiber), tail: Ref.get(stderrTail) }),
+  );
 });
