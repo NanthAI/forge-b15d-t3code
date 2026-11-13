@@ -57,7 +57,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
       return makeEncoderPage() as unknown as Page;
     }
     async connectDesktopPage(endpoint: string) {
-      const context = makeContext();
+      const context = makeContext(undefined, "https://example.com/desktop");
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -137,12 +137,12 @@ function fileChooserElement(accept: string) {
   };
 }
 
-function makeContext(onClose?: (context: BrowserContext) => void) {
+function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "about:blank") {
   const events = new NodeEvents.EventEmitter();
   const nativeFileChooser = vi.fn();
   const setChooserFiles = vi.fn(async (_files: unknown) => {});
   const sessions: ReturnType<typeof makeSession>[] = [];
-  let url = "about:blank";
+  let url = initialUrl;
   let viewport = { width: 1280, height: 800 };
   let closed = false;
   let contextClosed = false;
@@ -504,6 +504,34 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      const opened = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url: "https://example.com/desktop",
+        show: false,
+      });
+      let event;
+      do {
+        event = yield* PubSub.take(events);
+      } while (event.type !== "navigated" || event.tabId !== opened.tabId);
+
+      const navStatus = {
+        _tag: "Success",
+        url: "https://example.com/desktop",
+        title: "test page",
+      };
+      expect(event.snapshot.navStatus).toEqual(navStatus);
     }),
   ).pipe(Effect.provide(layer)),
 );
