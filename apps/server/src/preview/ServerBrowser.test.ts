@@ -816,6 +816,15 @@ it.live(
           .attachViewer(viewerInput(tabId, true))
           .pipe(Effect.forkScoped);
         yield* Effect.promise(() => started.promise);
+        const session = sessions.at(-1)!;
+        const viewerSend = session.send.getMockImplementation()!;
+        session.send.mockImplementation((method, input) =>
+          method === "Page.stopScreencast" ||
+          method === "Page.startScreencast" ||
+          method === "Page.captureScreenshot"
+            ? metrics.promise
+            : viewerSend(method, input),
+        );
         const checking = yield* broker
           .invoke<PreviewAutomationStatus>({ scope, tabId, operation: "status", input: {} })
           .pipe(Effect.forkScoped);
@@ -831,7 +840,6 @@ it.live(
             }),
           ]),
         );
-        const session = sessions.at(-1)!;
         for (let i = 0; i < 5; i++) {
           session.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: i });
         }

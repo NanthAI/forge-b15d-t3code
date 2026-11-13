@@ -2564,10 +2564,15 @@ const make = Effect.gen(function* () {
     });
     yield* Effect.promise(() => readLayoutSize(tab));
     broadcastViewport(tab);
-    yield* Effect.promise(() => startScreencast(1));
-    // An idle page does not repaint for a new screencast, so the viewer
-    // starts from a still unless a live frame beat it.
-    if (!screencastStarted) yield* Effect.promise(pushStill);
+    const start = Effect.promise(() => startScreencast(1)).pipe(
+      // An idle page needs a still unless a live frame beat it.
+      Effect.andThen(
+        Effect.suspend(() => (screencastStarted ? Effect.void : Effect.promise(pushStill))),
+      ),
+    );
+    // Desktop dialogs block capture; the viewer must attach to answer them.
+    if (tab.desktop) yield* start.pipe(Effect.forkScoped);
+    else yield* start;
     return {
       output,
       input: (raw: unknown) =>
