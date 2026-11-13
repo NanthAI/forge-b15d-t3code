@@ -11,6 +11,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
@@ -1352,6 +1353,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
     assert.strictEqual(httpViewer.stdout, '{"login":"maria"}');
     assert.strictEqual(requests.at(-1), "http://forgejo.local:3000/api/v1/user");
   }).pipe(
+    Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
     Effect.provideService(
       FileSystem.FileSystem,
       FileSystem.makeNoop({
@@ -1403,6 +1405,8 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.spawnCwd ?? input.cwd, "/home/test");
+            assert.ok(["/repo", "/no-remotes"].includes(input.cwd));
             assert.deepStrictEqual(input.args, [
               "--host",
               input.cwd === "/no-remotes"
@@ -1680,6 +1684,8 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.strictEqual(input.spawnCwd ?? input.cwd, "/home/test");
+                      assert.strictEqual(input.cwd, "/repo");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
@@ -1727,6 +1733,7 @@ it.effect(
               }),
             ),
           ),
+          Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
         );
       }
     }),
