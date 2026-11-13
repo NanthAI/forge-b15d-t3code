@@ -508,6 +508,39 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("desktop data pages report only their media type in load reports and status URLs", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      const url = `data:text/html;charset=${"x".repeat(2_048)},<p>PAYLOAD</p>`;
+      yield* Effect.promise(() => page.goto(url));
+      let loaded = yield* PubSub.take(events);
+      while (loaded.type !== "navigated" || loaded.snapshot.navStatus._tag !== "Success")
+        loaded = yield* PubSub.take(events);
+      expect.soft(loaded.snapshot.navStatus).toEqual({
+        _tag: "Success",
+        url: "data:text/html,…",
+        title: "test page",
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({
+        url: "data:text/html,…",
+        tabs: [{ tabId, url: "data:text/html,…" }],
+      });
+      expect(page.url()).toBe(url);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
