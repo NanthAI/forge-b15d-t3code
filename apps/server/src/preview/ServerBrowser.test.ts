@@ -36,6 +36,7 @@ import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import { ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 vi.mock("./ServerBrowserContexts.ts", () => ({
@@ -504,6 +505,42 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const url = "https://example.com/already-loaded";
+      const connectDesktop = ServerBrowserContexts.prototype.connectDesktopPage;
+      const attach = vi
+        .spyOn(ServerBrowserContexts.prototype, "connectDesktopPage")
+        .mockImplementationOnce(async function (this: ServerBrowserContexts, endpoint) {
+          const connected = await connectDesktop.call(this, endpoint);
+          await connected.page.goto(url);
+          return connected;
+        });
+      yield* Effect.addFinalizer(() => Effect.sync(() => attach.mockRestore()));
+      desktopRendersNext = true;
+      const opened = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url,
+      });
+      yield* browser.attachViewer(viewerInput(opened.tabId, false));
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated") event = yield* PubSub.take(events);
+      expect(event.snapshot.navStatus).toEqual({ _tag: "Success", url, title: "test page" });
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual({
+        _tag: "Success",
+        url,
+        title: "test page",
+      });
     }),
   ).pipe(Effect.provide(layer)),
 );
