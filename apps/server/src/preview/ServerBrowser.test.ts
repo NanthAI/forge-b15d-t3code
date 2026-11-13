@@ -59,6 +59,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
       if (desktopPageUrl) await context.page.goto(desktopPageUrl);
+      context.page.viewportSize.mockReturnValue(null);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -90,7 +91,7 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
   const events = new NodeEvents.EventEmitter();
   return {
     on: vi.fn((name: string, listener: () => void) => events.on(name, listener)),
-    emit: (name: string) => events.emit(name),
+    emit: (name: string, ...args: unknown[]) => events.emit(name, ...args),
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
@@ -115,6 +116,12 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
         if (focusedFrame) focusedFrame.copy = keyCopy || focusedFrame.copy;
         else pageCopy = keyCopy || pageCopy;
       }
+      if (
+        method === "Runtime.evaluate" &&
+        (input as { expression?: string }).expression ===
+          "({ ratio: devicePixelRatio, width: innerWidth, height: innerHeight })"
+      )
+        return { result: { value: { ratio: 2, width: 960, height: 640 } } };
       if (method === "Runtime.evaluate" && (input as { contextId?: number }).contextId === 7) {
         const value = frame ? frame.copy : pageCopy;
         if (frame) frame.copy = "";
@@ -174,7 +181,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     frames: () => [page],
     url: () => url,
     title: vi.fn(async () => "test page"),
-    viewportSize: () => viewport,
+    viewportSize: vi.fn((): typeof viewport | null => viewport),
     setViewportSize: vi.fn(async (size: typeof viewport) => {
       viewport = size;
     }),
@@ -768,6 +775,173 @@ it.live("streams to a read-only viewer without allowing takeover, input, or view
       });
       expect(page.setViewportSize).toHaveBeenCalledWith({ width: 390, height: 844 });
       yield* operator.input({ type: "releaseControl" });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("desktop viewers receive CSS dimensions and refresh them after a resize", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      const context = desktopConnections[0]!.context;
+      expect(context.page.viewportSize()).toBeNull();
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      expect(yield* Queue.takeAll(viewer.output)).toContainEqual({
+        _tag: "viewport",
+        width: 960,
+        height: 640,
+      });
+      yield* viewer.input({ type: "takeControl" });
+      const cdp = context.sessions[0]!;
+      const send = cdp.send.getMockImplementation()!;
+      cdp.send.mockImplementation(async (method, input) => {
+        if (method === "Runtime.evaluate") {
+          return { result: { value: { ratio: 2.5, width: 768, height: 512 } } };
+        }
+        return send(method, input);
+      });
+      const stream = context.sessions.at(-1)!;
+      stream.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: 1 });
+      let resized = yield* Queue.take(viewer.output);
+      while (resized._tag !== "viewport") resized = yield* Queue.take(viewer.output);
+      expect(resized).toEqual({ _tag: "viewport", width: 768, height: 512 });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.viewport).toEqual({ width: 768, height: 512 });
+      cdp.send.mockImplementation(async (method, input) => {
+        if (method === "Page.getLayoutMetrics") throw new Error("navigating");
+        return send(method, input);
+      });
+      const stale = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(stale.viewport).toEqual(status.viewport);
+      expect(context.page.setViewportSize).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a blocked desktop size read is bounded, shared and recovers after a dialog", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      const context = desktopConnections[0]!.context;
+      const cdp = context.sessions[0]!;
+      const send = cdp.send.getMockImplementation()!;
+      const started = Promise.withResolvers<void>();
+      const metrics = Promise.withResolvers<Record<string, unknown>>();
+      cdp.send.mockImplementation(async (method, input) => {
+        if (method === "Page.getLayoutMetrics") {
+          started.resolve();
+          return metrics.promise;
+        }
+        return send(method, input);
+      });
+      cdp.send.mockClear();
+      context.page.emit("dialog", {
+        type: () => "alert",
+        message: () => "hello",
+        defaultValue: () => "",
+        accept: async () => metrics.resolve({ cssVisualViewport: { zoom: 1 } }),
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      yield* Effect.addFinalizer(() => Effect.sync(() => vi.useRealTimers()));
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => metrics.resolve({ cssVisualViewport: { zoom: 1 } })),
+      );
+      const attaching = yield* browser
+        .attachViewer(viewerInput(tabId, true))
+        .pipe(Effect.forkScoped);
+      yield* Effect.promise(() => started.promise);
+      const statusCall = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        })
+        .pipe(Effect.forkScoped);
+      yield* Effect.promise(() => vi.advanceTimersByTimeAsync(2_000));
+      const viewer = yield* Fiber.join(attaching);
+      const status = yield* Fiber.join(statusCall);
+      expect(status.viewport).toEqual({ width: 960, height: 640 });
+      expect(status.dialog?.message).toBe("hello");
+      expect(yield* Queue.takeAll(viewer.output)).toContainEqual({
+        _tag: "viewport",
+        width: 960,
+        height: 640,
+      });
+      const stream = context.sessions.at(-1)!;
+      for (let i = 0; i < 10; i += 1) {
+        stream.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: i });
+      }
+      yield* broker.invoke({ scope, tabId, operation: "status", input: {} });
+      expect(
+        cdp.send.mock.calls.filter(([method]) => method === "Page.getLayoutMetrics"),
+      ).toHaveLength(1);
+      cdp.send.mockImplementation(async (method, input) => {
+        if (method === "Runtime.evaluate") {
+          return { result: { value: { ratio: 2, width: 800, height: 600 } } };
+        }
+        return send(method, input);
+      });
+      yield* viewer.input({ type: "takeControl" });
+      yield* viewer.input({ type: "dialog", accept: true });
+      let recovered = yield* Queue.take(viewer.output);
+      while (recovered._tag !== "viewport") recovered = yield* Queue.take(viewer.output);
+      expect(recovered).toEqual({ _tag: "viewport", width: 800, height: 600 });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("slow desktop viewers retain viewport, control and reconnect state", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const stream = desktopConnections[0]!.context.sessions.at(-1)!;
+      const fill = () => {
+        for (let i = 0; i < 80; i += 1) {
+          stream.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: i });
+        }
+      };
+      fill();
+      yield* viewer.input({ type: "takeControl" });
+      const outputs = yield* Queue.takeAll(viewer.output);
+      expect(outputs).toContainEqual({ _tag: "viewport", width: 960, height: 640 });
+      expect(outputs).toContainEqual(
+        expect.objectContaining({ _tag: "control", controller: "you" }),
+      );
+      const cdp = desktopConnections[0]!.context.sessions[0]!;
+      const send = cdp.send.getMockImplementation()!;
+      cdp.send.mockImplementation(async (method, input) => {
+        if (method === "Runtime.evaluate") {
+          return { result: { value: { ratio: 2, width: 800, height: 600 } } };
+        }
+        return send(method, input);
+      });
+      fill();
+      yield* broker.invoke({ scope, tabId, operation: "status", input: {} });
+      const resized = yield* Queue.takeAll(viewer.output);
+      expect(resized).toContainEqual({ _tag: "viewport", width: 800, height: 600 });
+      expect(resized).toContainEqual(
+        expect.objectContaining({ _tag: "control", controller: "you" }),
+      );
+      fill();
+      desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId });
+      let disconnected = yield* Queue.take(viewer.output);
+      while (disconnected._tag !== "reconnect") disconnected = yield* Queue.take(viewer.output);
+      expect(disconnected).toEqual({ _tag: "reconnect" });
     }),
   ).pipe(Effect.provide(layer)),
 );
