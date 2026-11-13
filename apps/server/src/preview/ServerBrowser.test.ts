@@ -58,7 +58,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
       return makeEncoderPage() as unknown as Page;
     }
     async connectDesktopPage(endpoint: string) {
-      const context = makeContext(undefined, "https://example.com/desktop");
+      const context = makeContext(undefined, desktopPageUrl);
       context.page.viewportSize = () => null;
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
@@ -301,6 +301,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopPageUrl = "about:blank";
 let layoutMetrics = { clientWidth: 1000, clientHeight: 700 };
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
@@ -414,6 +415,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopPageUrl = "about:blank";
   layoutMetrics = { clientWidth: 1000, clientHeight: 700 };
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
@@ -536,6 +538,7 @@ it.effect("a desktop page that loaded before the server attached reports its loa
       const manager = yield* Manager.PreviewManager;
       const events = yield* manager.subscribeEvents;
       desktopRendersNext = true;
+      desktopPageUrl = "https://example.com/desktop";
       const opened = yield* manager.open({
         threadId: scope.thread.threadId,
         runtime: "server",
