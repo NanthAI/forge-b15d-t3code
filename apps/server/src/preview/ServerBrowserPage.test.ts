@@ -227,6 +227,17 @@ describe("server browser element refs", () => {
     await expect(ServerBrowserPage.click(page, { locator })).rejects.toThrow(/stale/);
   });
 
+  it.each([
+    "data:text/html;charset=utf-8,<p>Page content</p>",
+    `data:text/html;base64,${Buffer.from("<p>Page content</p>").toString("base64")}`,
+  ])("redacts the snapshot page URL while preserving visible text (%s)", async (url) => {
+    await page.goto(url);
+    const result = await takeSnapshot();
+    expect(result.url).toBe("data:text/html,…");
+    expect(result.visibleText).toBe("Page content");
+    expect(result.accessibilityTree).toContain("Page content");
+  });
+
   it.each(["aria-ref=e1", " aria-ref=e1", "css=body >> aria-ref=e1"])(
     "does not allow native refs to bypass generation validation (%s)",
     async (locator) => {
