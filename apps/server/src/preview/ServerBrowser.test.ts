@@ -57,7 +57,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
       return makeEncoderPage() as unknown as Page;
     }
     async connectDesktopPage(endpoint: string) {
-      const context = makeContext();
+      const context = makeContext(undefined, desktopInitialUrl);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -137,12 +137,12 @@ function fileChooserElement(accept: string) {
   };
 }
 
-function makeContext(onClose?: (context: BrowserContext) => void) {
+function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "about:blank") {
   const events = new NodeEvents.EventEmitter();
   const nativeFileChooser = vi.fn();
   const setChooserFiles = vi.fn(async (_files: unknown) => {});
   const sessions: ReturnType<typeof makeSession>[] = [];
-  let url = "about:blank";
+  let url = initialUrl;
   let viewport = { width: 1280, height: 800 };
   let closed = false;
   let contextClosed = false;
@@ -282,6 +282,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopInitialUrl = "about:blank";
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -394,6 +395,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopInitialUrl = "about:blank";
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -504,6 +506,36 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      desktopInitialUrl = "https://example.com/loaded";
+      const opened = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url: desktopInitialUrl,
+      });
+      expect(opened.navStatus._tag).toBe("Loading");
+      yield* browser.attachViewer(viewerInput(opened.tabId, true));
+
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated" || event.snapshot.tabId !== opened.tabId) {
+        event = yield* PubSub.take(events);
+      }
+      const navStatus = { _tag: "Success", url: desktopInitialUrl, title: "test page" };
+      expect(event.snapshot.navStatus).toEqual(navStatus);
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual(
+        navStatus,
+      );
     }),
   ).pipe(Effect.provide(layer)),
 );

@@ -928,6 +928,11 @@ const make = Effect.gen(function* () {
       if (tab.control.agentId !== null) tab.control.track(tab.initialNavigation);
       else void tab.initialNavigation.catch(constVoid);
     }
+    if (desktop)
+      void page
+        .waitForLoadState("load")
+        .then(() => reportLoaded(tab))
+        .catch(constVoid);
     return tab;
   };
 
