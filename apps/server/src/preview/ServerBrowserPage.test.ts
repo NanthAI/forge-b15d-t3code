@@ -177,7 +177,8 @@ describe("server browser element refs", () => {
 
   it("shows a data: link or blocked data: navigation by media type only", async () => {
     // Chromium keeps raw spaces and quotes in both, so a payload can't be cut at either.
-    await page.setContent(`
+    await page.goto(
+      `data:text/html;charset=utf-8,${encodeURIComponent(`
       <a download href="data:text/plain;charset=&quot;a,b&quot;,head PAYLOAD'tail">Key</a>
       <a href="https://example.com/data:report,2026">Report</a>
       <a href="#">data:text/plain,label</a>
@@ -193,8 +194,12 @@ describe("server browser element refs", () => {
       <script>
         controlled.href = "\\x01data:text/plain,PAYLOAD";
         escaped.href = "\\x02da\\tta:text/plain,PAYLOAD";
-      </script>`);
-    const tree = String((await takeSnapshot()).accessibilityTree);
+      </script>`)}`,
+    );
+    const snapshot = await takeSnapshot();
+    expect(snapshot.url).toBe("data:text/html,…");
+    expect(snapshot.visibleText).toContain("data:text/plain,label");
+    const tree = String(snapshot.accessibilityTree);
     expect(tree.match(/\/url: data:text\/plain,…$/gm)).toHaveLength(8);
     expect(tree).toContain("/url: data:,…");
     expect(tree).toContain("/url: https://example.com/data:report,2026");
