@@ -33,6 +33,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -169,6 +170,7 @@ interface FakePi {
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
+  readonly queueClearQueueResponse: (response: PiRpcRecord | null) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -197,6 +199,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
+  const clearQueueResponses: Array<PiRpcRecord | null> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -271,6 +274,15 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
+      case "clear_queue": {
+        const response = clearQueueResponses.shift();
+        if (response === null) return null;
+        return {
+          ...base,
+          data: { steering: [], followUp: [] },
+          ...response,
+        };
+      }
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       default:
@@ -386,6 +398,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       isStreaming = streaming;
     },
     queueStats: (data) => statsQueue.push(data),
+    queueClearQueueResponse: (response) => clearQueueResponses.push(response),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -3873,6 +3886,80 @@ describe("PiAdapterV2", () => {
       yield* fake.emit({ type: "agent_settled" });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each(
+    [false, true].flatMap((restart) =>
+      ["cleared", "unsupported", "failure", "timeout"].map((result) => ({ restart, result })),
+    ),
+  )("clears Pi's queue before Stop, restart=$restart, result=$result", ({ restart, result }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      if (running.type !== "provider_turn.updated") return;
+      fake.queueClearQueueResponse(
+        result === "timeout"
+          ? null
+          : result === "cleared"
+            ? { data: { steering: ["Queued steer", "   "], followUp: ["Queued follow-up"] } }
+            : {
+                success: false,
+                error: result === "unsupported" ? "Unknown command: clear_queue" : "clear failed",
+              },
+      );
+
+      const stopping = yield* runtime
+        .interruptTurn({
+          providerThread,
+          providerTurnId: running.providerTurn.id,
+          requestRuntimeRestart: restart,
+        })
+        .pipe(Effect.forkScoped);
+      if (result === "timeout") {
+        yield* fake.takeRequest("clear_queue");
+        assert.isFalse(fake.allRequests().some((request) => request["type"] === "abort"));
+        yield* TestClock.adjust("2 seconds");
+      }
+      yield* Fiber.join(stopping);
+      assert.deepEqual(
+        fake
+          .allRequests()
+          .map((request) => request["type"])
+          .filter((type) => type === "clear_queue" || type === "abort"),
+        ["clear_queue", "abort"],
+      );
+      if (!restart) yield* fake.emit({ type: "agent_settled" });
+      const notices: Array<string> = [];
+      const terminal = yield* takeEvent((event) => {
+        if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+          assert.equal(event.turnItem.providerTurnId, running.providerTurn.id);
+          notices.push(event.turnItem.message);
+        }
+        return event.type === "turn.terminal";
+      });
+      assert.deepEqual(
+        notices,
+        result === "cleared"
+          ? [
+              "Cleared 3 queued Pi messages before stopping. Pi did not read them.\n\n- Queued steer\n- Queued follow-up",
+            ]
+          : [],
+      );
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
