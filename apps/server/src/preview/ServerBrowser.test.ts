@@ -690,6 +690,48 @@ it.live("a stalled desktop viewer keeps viewport, control and reconnect state", 
   ).pipe(Effect.provide(layer)),
 );
 
+it.effect("reports a desktop data page by media type in load reports and status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      yield* Effect.promise(() => page.goto("data:text/html;charset=utf-8,<p>PAGE CONTENT</p>"));
+      expect(yield* PubSub.take(events)).toMatchObject({
+        type: "navigated",
+        snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(desktopTab.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ tabId, url: null }),
+          expect.objectContaining({ tabId: desktopTab.tabId, url: "data:text/html,…" }),
+        ]),
+      );
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(other.tabs).toEqual(status.tabs);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
