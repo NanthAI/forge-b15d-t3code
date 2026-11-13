@@ -638,10 +638,8 @@ const make = Effect.gen(function* () {
     if (!tab.viewportRead) {
       // A dialog can stall CDP. Keep the read in flight after the wait expires so frames
       // and other viewers cannot pile more requests onto the blocked page.
-      const read = tab.cdp
-        .send("Page.getLayoutMetrics")
-        .then(({ cssLayoutViewport }) => {
-          const { clientWidth: width, clientHeight: height } = cssLayoutViewport;
+      const read = ServerBrowserPage.readPageMetrics(tab.cdp)
+        .then(({ width, height }) => {
           if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0)
             return;
           if (tab.closing) return;

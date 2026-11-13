@@ -36,6 +36,7 @@ import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 vi.mock("./ServerBrowserContexts.ts", () => ({
@@ -97,7 +98,10 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
       if (method === "Page.getLayoutMetrics")
         return {
           cssVisualViewport: { pageX: 0, pageY: 0 },
-          cssLayoutViewport: layoutMetrics,
+          cssLayoutViewport: {
+            clientWidth: layoutMetrics.clientWidth - 15,
+            clientHeight: layoutMetrics.clientHeight,
+          },
         };
       if (method === "Page.captureScreenshot") {
         // A snapshot sizes its screenshot from the PNG header; viewers get JPEG frames as-is.
@@ -120,6 +124,16 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
         else pageCopy = keyCopy || pageCopy;
       }
       if (method === "Runtime.evaluate" && (input as { contextId?: number }).contextId === 7) {
+        if ((input as { expression?: string }).expression?.includes("ratio: devicePixelRatio"))
+          return {
+            result: {
+              value: {
+                ratio: 1,
+                width: layoutMetrics.clientWidth,
+                height: layoutMetrics.clientHeight,
+              },
+            },
+          };
         const value = frame ? frame.copy : pageCopy;
         if (frame) frame.copy = "";
         else pageCopy = "";
@@ -693,10 +707,7 @@ it.live("desktop viewers receive CSS coordinates and preserve state under backpr
       ).toMatchObject({ viewport: { width: 1000, height: 700 } });
       yield* viewer.input({ type: "takeControl" });
       const session = context.sessions.at(-1)!;
-      const metrics = context.sessions[0]!;
-      metrics.send.mockResolvedValueOnce({
-        cssLayoutViewport: { clientWidth: 900, clientHeight: 600 },
-      });
+      layoutMetrics = { clientWidth: 900, clientHeight: 600 };
       for (let index = 0; index < 70; index++) {
         session.emit("Page.screencastFrame", {
           data: "ZnJhbWU=",
@@ -744,7 +755,8 @@ it.live.each([true, false])(
         if (!cached) layoutMetrics = { clientWidth: 0, clientHeight: 0 };
         const { browser, broker, tabId } = yield* ready;
         const context = desktopConnections[0]!.context;
-        const metrics = context.sessions[0]!;
+        const metrics = vi.spyOn(ServerBrowserPage, "readPageMetrics");
+        yield* Effect.addFinalizer(() => Effect.sync(() => metrics.mockRestore()));
         const status = broker.invoke<PreviewAutomationStatus>({
           scope,
           tabId,
@@ -753,17 +765,18 @@ it.live.each([true, false])(
         });
         for (const response of [
           () => Promise.reject(new Error("navigation replaced the page")),
-          () => Promise.resolve({ cssLayoutViewport: { clientWidth: 0, clientHeight: 0 } }),
-          () => Promise.resolve({ cssLayoutViewport: { clientWidth: NaN, clientHeight: 700 } }),
+          () => Promise.resolve({ ratio: 1, zoom: 1, width: 0, height: 0 }),
+          () => Promise.resolve({ ratio: 1, zoom: 1, width: NaN, height: 700 }),
         ]) {
-          metrics.send.mockImplementationOnce(response);
+          metrics.mockImplementationOnce(response);
           expect((yield* status).viewport).toEqual(
             cached ? { width: 1000, height: 700 } : undefined,
           );
         }
         const started = Promise.withResolvers<void>();
-        const pending = Promise.withResolvers<Record<string, unknown>>();
-        metrics.send.mockImplementationOnce(() => {
+        const pending =
+          Promise.withResolvers<Awaited<ReturnType<typeof ServerBrowserPage.readPageMetrics>>>();
+        metrics.mockImplementationOnce(() => {
           started.resolve();
           return pending.promise;
         });
@@ -774,12 +787,14 @@ it.live.each([true, false])(
         });
         vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
         yield* Effect.addFinalizer(() => Effect.sync(() => vi.useRealTimers()));
-        yield* Effect.addFinalizer(() => Effect.sync(() => pending.resolve({})));
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => pending.resolve({ ratio: 1, zoom: 1, width: 0, height: 0 })),
+        );
         const attaching = yield* browser
           .attachViewer(viewerInput(tabId, true))
           .pipe(Effect.forkScoped);
         yield* Effect.promise(() => started.promise);
-        const calls = metrics.send.mock.calls.length;
+        const calls = metrics.mock.calls.length;
         yield* Effect.promise(() => vi.advanceTimersByTimeAsync(2_000));
         const viewer = yield* Fiber.join(attaching);
         const viewports = (yield* Queue.takeAll(viewer.output)).filter(
@@ -792,8 +807,8 @@ it.live.each([true, false])(
         const stalled = yield* status;
         expect(stalled.viewport).toEqual(cached ? { width: 1000, height: 700 } : undefined);
         expect(stalled.dialog).toMatchObject({ type: "alert" });
-        expect(metrics.send.mock.calls).toHaveLength(calls);
-        pending.resolve({ cssLayoutViewport: { clientWidth: 850, clientHeight: 650 } });
+        expect(metrics.mock.calls).toHaveLength(calls);
+        pending.resolve({ ratio: 1, zoom: 1, width: 850, height: 650 });
         let output = yield* Queue.take(viewer.output);
         while (output._tag !== "viewport" || output.width !== 850)
           output = yield* Queue.take(viewer.output);
