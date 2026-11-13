@@ -1632,6 +1632,39 @@ it.live("agents read a human's tab with no arguments and act on it only while no
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("data pages expose only their media type in load reports and preview status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      const url = `data:text/html;charset=utf-8,${"<p>PAGE CONTENT</p>".repeat(200)}`;
+      yield* Effect.promise(() => page.goto(url));
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated") event = yield* PubSub.take(events);
+      expect(event.snapshot.navStatus).toEqual({
+        _tag: "Success",
+        url: "data:text/html,…",
+        title: "test page",
+      });
+      expect(
+        (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]?.navStatus,
+      ).toEqual(event.snapshot.navStatus);
+      expect(page.url()).toBe(url);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("a session's own tab stays its default while other sessions' tabs are listed", () =>
   Effect.scoped(
     Effect.gen(function* () {
