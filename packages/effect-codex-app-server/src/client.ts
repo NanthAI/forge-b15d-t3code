@@ -105,6 +105,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const termination = yield* Deferred.make<never, CodexError.CodexAppServerError>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
+  const warnedDecodeFailures = new Set<string>();
   let unknownRequestHandler:
     | ((method: string, params: unknown) => Effect.Effect<unknown, CodexError.CodexAppServerError>)
     | undefined;
@@ -167,6 +168,22 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
     if (schema) {
       return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+        Effect.tapError((error) => {
+          const key = `${notification.method}\n${error.issueKinds?.join(",")}`;
+          if (warnedDecodeFailures.has(key)) return Effect.void;
+          warnedDecodeFailures.add(key);
+          return Effect.logWarning(
+            "Dropped a Codex App Server notification that failed to decode",
+          ).pipe(
+            Effect.annotateLogs({
+              operation: error.operation,
+              method: error.method,
+              issueCount: error.issueCount,
+              issueKinds: error.issueKinds,
+              maximumPathDepth: error.maximumPathDepth,
+            }),
+          );
+        }),
         Effect.flatMap((decoded) =>
           Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
         ),

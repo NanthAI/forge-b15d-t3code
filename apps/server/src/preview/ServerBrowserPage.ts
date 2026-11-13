@@ -21,6 +21,7 @@ import {
 import { constVoid } from "effect/Function";
 import type { CDPSession, ConsoleMessage, Frame, Locator, Page } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
+import { withoutDataPayload } from "./PreviewUrl.ts";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
 
 const MAX_EVALUATION_BYTES = 64_000;
@@ -156,31 +157,6 @@ const SNAPSHOT_SCRIPT = `(() => {
 })()`;
 
 const MASKED_VALUE = "••••••••";
-
-/**
- * A `data:` URL carries its content, which can be a whole file, and URLs and diagnostics
- * reach tool results and provider logs. Keeps only the media type: the payload can hold any
- * character and parameters are page-chosen too.
- */
-export const withoutDataPayload = (url: string) => {
-  // Read the scheme as a browser would: it ignores leading controls and spaces, and tabs and
-  // newlines anywhere. A snapshot's YAML value may be quoted and escaped; an escape that isn't a
-  // tab or newline still decodes to something that can't start a scheme.
-  const value = url
-    .replace(/^["']/, "")
-    .replace(/\\(x[\da-f]{2}|u[\da-f]{4}|.)/gi, (_escape, code: string) =>
-      code.length > 1
-        ? String.fromCharCode(Number.parseInt(code.slice(1), 16))
-        : ({ t: "\t", n: "\n", r: "\r", '"': '"', "\\": "\\" }[code] ?? "\u0001"),
-    )
-    .replace(/[\t\n\r]/g, "")
-    .replace(/^[\u0000-\u0020]+/, "");
-  const parsed = /^data:([^,;]*)/i.exec(value);
-  if (!parsed) return url;
-  const type = parsed[1]!.trim();
-  const mediaType = /^[\w.+-]{1,64}\/[\w.+-]{1,64}$/.test(type) ? type : "";
-  return `data:${mediaType},…`;
-};
 
 /**
  * Chromium's own console messages, which carry no arguments, quote `data:` URLs whole, as in a
@@ -414,7 +390,7 @@ const pngSize = (base64: string) => {
  * A page's display ratio and CSS viewport, read in an isolated world since page script can
  * reassign `devicePixelRatio`, `innerWidth`, and `innerHeight` in its own, and its page zoom.
  */
-const readPageMetrics = async (cdp: CDPSession) => {
+export const readPageMetrics = async (cdp: CDPSession) => {
   const { frameTree } = await cdp.send("Page.getFrameTree");
   const { executionContextId } = await cdp.send("Page.createIsolatedWorld", {
     frameId: frameTree.frame.id,
@@ -583,6 +559,7 @@ const capture = async (
     });
   return {
     ...page,
+    url: withoutDataPayload(page.url),
     // Mask text before truncating so a value crossing the cut cannot leak its prefix.
     visibleText: mask(page.visibleText).slice(0, MAX_VISIBLE_TEXT_LENGTH),
     accessibilityTree,
