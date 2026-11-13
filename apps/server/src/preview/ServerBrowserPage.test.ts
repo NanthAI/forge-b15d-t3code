@@ -212,6 +212,16 @@ describe("server browser element refs", () => {
     expect(tree).not.toContain("PAYLOAD");
   });
 
+  it("redacts a data: page URL while keeping its visible text", async () => {
+    const html = "<title>Data page</title><p>Page content</p>";
+    await page.goto(`data:text/html;charset=utf-8;base64,${Buffer.from(html).toString("base64")}`);
+    const result = await takeSnapshot();
+    expect(result.url).toBe("data:text/html,…");
+    expect(result.title).toBe("Data page");
+    expect(result.visibleText).toBe("Page content");
+    expect(result.accessibilityTree).toContain("Page content");
+  });
+
   it("rejects refs from another tab", async () => {
     await page.setContent("<button>same label</button>");
     const locator = buttonLocator((await takeSnapshot()).accessibilityTree, "same label");
