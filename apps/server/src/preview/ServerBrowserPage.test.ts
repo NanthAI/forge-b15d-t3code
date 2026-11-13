@@ -212,6 +212,18 @@ describe("server browser element refs", () => {
     expect(tree).not.toContain("PAYLOAD");
   });
 
+  it.each([
+    ["data:text/html,<p>PAGE CONTENT</p>", "data:text/html,…"],
+    ["data:text/html;charset=utf-8,<p>PAGE CONTENT</p>", "data:text/html,…"],
+    ["data:text/html;base64,PHA+UEFHRSBDT05URU5UPC9wPg==", "data:text/html,…"],
+    ["data:,PAGE CONTENT", "data:,…"],
+  ])("redacts the snapshot URL of %s while preserving visible text", async (url, redacted) => {
+    await page.goto(url);
+    const result = await takeSnapshot();
+    expect(result.url).toBe(redacted);
+    expect(result.visibleText).toBe("PAGE CONTENT");
+  });
+
   it("rejects refs from another tab", async () => {
     await page.setContent("<button>same label</button>");
     const locator = buttonLocator((await takeSnapshot()).accessibilityTree, "same label");
