@@ -13,6 +13,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as ForgejoPullRequestProvider from "./ForgejoPullRequestProvider.ts";
@@ -1294,6 +1295,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
 
 it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
   const commands: string[] = [];
+  const authHosts: string[] = [];
   const requests: string[] = [];
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
@@ -1351,7 +1353,9 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
     const httpViewer = yield* cli.api({ cwd: "/repo", host: "forgejo.local:3000", path: "user" });
     assert.strictEqual(httpViewer.stdout, '{"login":"maria"}');
     assert.strictEqual(requests.at(-1), "http://forgejo.local:3000/api/v1/user");
+    assert.deepStrictEqual(authHosts, ["http://forgejo.local:3000", "https://forgejo.local:3000"]);
   }).pipe(
+    Effect.provideService(HostProcess.HomeDirectory, "/home/maria"),
     Effect.provideService(
       FileSystem.FileSystem,
       FileSystem.makeNoop({
@@ -1403,11 +1407,11 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.cwd, "/home/maria");
+            authHosts.push(input.args[1] ?? "");
             assert.deepStrictEqual(input.args, [
               "--host",
-              input.cwd === "/no-remotes"
-                ? "https://forgejo.local:3000"
-                : "http://forgejo.local:3000",
+              authHosts.length === 2 ? "https://forgejo.local:3000" : "http://forgejo.local:3000",
               "whoami",
             ]);
             return Effect.succeed(processOutput(""));
@@ -1636,6 +1640,7 @@ it.effect(
           );
           assert.include(commands, "fj version");
         }).pipe(
+          Effect.provideService(HostProcess.HomeDirectory, "/home/maria"),
           Effect.provide(
             Layer.mergeAll(
               Layer.mock(ForgejoCli.ForgejoCli)({
@@ -1680,6 +1685,7 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.strictEqual(input.cwd, "/home/maria");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
