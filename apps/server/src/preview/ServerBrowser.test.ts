@@ -910,6 +910,20 @@ it.live(
         );
         for (const output of outputs)
           if (output._tag === "frame") yield* output.ack.pipe(Effect.forkScoped);
+        context.page.openFileChooser();
+        let chooser = yield* Queue.take(viewer.output);
+        while (chooser._tag !== "fileChooser") chooser = yield* Queue.take(viewer.output);
+        fill();
+        metrics.send.mockImplementation((method, input) =>
+          method === "Page.getLayoutMetrics"
+            ? Promise.resolve({ cssLayoutViewport: { clientWidth: 950, clientHeight: 610 } })
+            : send(method, input),
+        );
+        yield* broker.invoke({ scope, tabId, operation: "status", input: {} });
+        const afterResize = yield* Queue.takeAll(viewer.output);
+        expect(afterResize).toContainEqual(chooser);
+        for (const output of afterResize)
+          if (output._tag === "frame") yield* output.ack.pipe(Effect.forkScoped);
         fill();
         desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId });
         let output = yield* Queue.take(viewer.output);

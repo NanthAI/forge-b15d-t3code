@@ -2474,7 +2474,7 @@ const make = Effect.gen(function* () {
               retained.set(item._tag, item);
           }
           retained.set(next._tag, next);
-          const chooser = next._tag === "control" ? fileChooserMessage(tab) : null;
+          const chooser = fileChooserMessage(tab);
           if (chooser && tab.control.controller === viewer.id) retained.set(chooser._tag, chooser);
           for (const item of retained.values()) Queue.offerUnsafe(output, item);
         }
