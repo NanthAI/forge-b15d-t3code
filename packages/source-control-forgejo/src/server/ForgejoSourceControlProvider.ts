@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import { SourceControlProviderError } from "@t3tools/contracts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import {
@@ -93,9 +94,11 @@ export const makeDiscovery = Effect.gen(function* () {
         (remote && ForgejoCli.matchForgejoLogin(logins, remote)) ||
         logins.find((entry) => entry.default === "true") ||
         logins[0];
+      const home = yield* HostProcess.HomeDirectory;
       const fj = yield* probeSourceControlProvider({
         cwd,
-        process,
+        // Keep fj's repository detection away from projects with no commits.
+        process: { run: (input) => process.run({ ...input, spawnCwd: home }) },
         spec: {
           ...discovery,
           executable: "fj",
