@@ -444,6 +444,11 @@ const readPageMetrics = async (cdp: CDPSession) => {
   );
 };
 
+export const readViewport = async (cdp: CDPSession) => {
+  const { width, height } = await readPageMetrics(cdp);
+  return { width, height };
+};
+
 // Never pass a clip scale: Chromium mirrors the top-left of the page into a `backdrop-filter`
 // in any capture it shrinks.
 export const captureViewport = async (
