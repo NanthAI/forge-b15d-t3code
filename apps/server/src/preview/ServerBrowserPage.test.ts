@@ -201,6 +201,11 @@ describe("server browser element refs", () => {
     expect(tree).toMatch(/link "data:text\/plain,label" \[ref=t3-/);
     expect(tree).not.toMatch(/PAYLOAD|tail|charset|\u2028/);
     expect(tree).toContain('/url: "\\"data:text/plain,relative"');
+
+    await page.goto("data:text/html;charset=utf-8,<p>Page content</p>");
+    const snapshot = await takeSnapshot();
+    expect(snapshot.url).toBe("data:text/html,…");
+    expect(snapshot.visibleText).toBe("Page content");
   });
 
   it("redacts a data: link whose scheme a password value would mask", async () => {
