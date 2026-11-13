@@ -231,7 +231,10 @@ describe("server browser element refs", () => {
 
   it("revokes refs after navigation even when labels are identical", async () => {
     await page.goto("data:text/html,<button>continue</button>");
-    const locator = buttonLocator((await takeSnapshot()).accessibilityTree, "continue");
+    const result = await takeSnapshot();
+    expect(result.url).toBe("data:text/html,…");
+    expect(result.visibleText).toBe("continue");
+    const locator = buttonLocator(result.accessibilityTree, "continue");
     await page.goto("data:text/html,<button>continue</button><p>new document</p>");
     await expect(ServerBrowserPage.click(page, { locator })).rejects.toThrow(/stale/);
   });

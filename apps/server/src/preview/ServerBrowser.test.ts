@@ -59,6 +59,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
       vi.spyOn(context.page, "viewportSize").mockReturnValue(null);
+      if (desktopInitialUrl) await context.page.goto(desktopInitialUrl);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -291,6 +292,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopInitialUrl: string | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -403,6 +405,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopInitialUrl = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -496,6 +499,41 @@ it.live.each(["desktop" as const, undefined])(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([
+  {
+    url: `data:text/html;charset=utf-8,<p>${"PAYLOAD".repeat(400)}</p>`,
+    reported: "data:text/html,…",
+  },
+  { url: "data:text/html;base64,PHA+UEFZTE9BRDwvcD4=", reported: "data:text/html,…" },
+  { url: "data:,PAYLOAD", reported: "data:,…" },
+  { url: "https://example.com/data:report,2026", reported: "https://example.com/data:report,2026" },
+])(
+  "desktop page load reports and status expose only a data URL's media type ($reported)",
+  ({ url, reported }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        yield* Effect.promise(() => desktopConnections[0]!.context.page.goto(url));
+        expect(yield* PubSub.take(events)).toMatchObject({
+          type: "navigated",
+          tabId,
+          snapshot: { navStatus: { _tag: "Success", url: reported } },
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.url).toBe(reported);
+        expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: reported })]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.effect("a tab the desktop does not draw is marked headless, so the desktop streams it", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -579,6 +617,40 @@ it.live(
         expect(output._tag).toBe("reconnect");
       }),
     ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      desktopInitialUrl = "https://example.com/loaded";
+      const opened = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url: desktopInitialUrl,
+      });
+      yield* browser.attachViewer(viewerInput(opened.tabId, true));
+
+      let event;
+      do {
+        event = yield* PubSub.take(events);
+      } while (event.type !== "navigated" || event.tabId !== opened.tabId);
+
+      expect(event.snapshot.navStatus).toEqual({
+        _tag: "Success",
+        url: desktopInitialUrl,
+        title: "test page",
+      });
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual(
+        event.snapshot.navStatus,
+      );
+      expect(desktopConnections[0]!.context.page.goto).toHaveBeenCalledTimes(1);
+    }),
+  ).pipe(Effect.provide(layer)),
 );
 
 it.live.each([
