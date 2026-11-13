@@ -1657,6 +1657,31 @@ it.live("a session's own tab stays its default while other sessions' tabs are li
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("reports a data page by media type in load events and current and listed tab status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      yield* Effect.promise(() =>
+        contexts[0]!.page.goto("data:text/html;charset=utf-8,<p>PAYLOAD</p>"),
+      );
+      expect(yield* PubSub.take(events)).toMatchObject({
+        type: "navigated",
+        snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live(
   "preview_open picks a reported profile by id or name and defaults to the reported one",
   () =>
