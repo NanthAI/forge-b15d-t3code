@@ -72,6 +72,25 @@ describe("server browser element refs", () => {
     ]);
   });
 
+  it("reads CSS dimensions without a Playwright viewport or page globals", async () => {
+    await context.close();
+    context = await browser.newContext({ viewport: null });
+    page = await context.newPage();
+    cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 800,
+      height: 600,
+      deviceScaleFactor: 2,
+      mobile: false,
+    });
+    await page.evaluate(`
+      Object.defineProperty(window, "innerWidth", { value: 7 });
+      Object.defineProperty(window, "innerHeight", { value: 9 });
+    `);
+    expect(page.viewportSize()).toBeNull();
+    expect(await ServerBrowserPage.readViewport(cdp)).toEqual({ width: 800, height: 600 });
+  });
+
   it("returns from a click once it opens a dialog", async () => {
     await page.setContent(
       `<button onclick="document.body.dataset.answer = String(confirm('sure?'))">Confirm</button>`,
