@@ -79,6 +79,40 @@ it.layer(layer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect("redacts data page URLs in reported status, lists, and load failures", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const opened = yield* manager.open({ threadId });
+      const collector = yield* collectEvents;
+      const url = 'data:text/html;charset="a,b",<p>URL_PAYLOAD</p>';
+      for (const navStatus of [
+        { _tag: "Loading", url, title: "Loading" },
+        { _tag: "Success", url, title: "Ready" },
+        { _tag: "LoadFailed", url, title: "Failed", code: -3, description: "Aborted" },
+        { _tag: "Idle" },
+      ] as const) {
+        yield* manager.reportStatus({
+          threadId,
+          tabId: opened.tabId,
+          navStatus,
+          canGoBack: true,
+          canGoForward: false,
+        });
+        const expected =
+          navStatus._tag === "Idle" ? navStatus : { ...navStatus, url: "data:text/html,…" };
+        expect((yield* manager.list({ threadId })).sessions[0]?.navStatus).toEqual(expected);
+        const events = yield* collector.drain;
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject(
+          navStatus._tag === "LoadFailed"
+            ? { type: "failed", url: "data:text/html,…", code: -3, description: "Aborted" }
+            : { type: "navigated", snapshot: { navStatus: expected } },
+        );
+      }
+    }),
+  );
+
   it.effect("reissues presentation requests without replaying them on navigation", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
