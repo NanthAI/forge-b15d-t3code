@@ -1,7 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { type PreviewEvent, ThreadId } from "@t3tools/contracts";
+import { type PreviewEvent, type PreviewNavStatus, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -76,6 +76,45 @@ it.layer(layer)("PreviewManager", (it) => {
       });
       const listed = yield* manager.list({ threadId });
       expect(listed.sessions.find((s) => s.tabId === opened.tabId)?.profileId).toBe("work");
+    }),
+  );
+
+  it.effect("redacts data URLs before storing or publishing navigation status", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const url = 'data:text/html;charset="a,b",<p>PRIVATE PAGE</p>';
+      const statuses: ReadonlyArray<PreviewNavStatus> = [
+        { _tag: "Loading", url, title: "" },
+        { _tag: "Success", url, title: "Page" },
+        { _tag: "LoadFailed", url, title: "Page", code: -2, description: "Failed" },
+        { _tag: "Idle" },
+      ];
+      for (const runtime of ["desktop", "server"] as const) {
+        const threadId = freshThreadId();
+        const { tabId } = yield* manager.open({ threadId, runtime });
+        const collector = yield* collectEvents;
+        for (const navStatus of statuses) {
+          yield* manager.reportStatus({
+            threadId,
+            tabId,
+            serverControlled: runtime === "server",
+            navStatus,
+            canGoBack: true,
+            canGoForward: false,
+          });
+          const expected =
+            navStatus._tag === "Idle" ? navStatus : { ...navStatus, url: "data:text/html,…" };
+          expect((yield* manager.list({ threadId })).sessions[0]?.navStatus).toEqual(expected);
+          const events = yield* collector.drain;
+          expect(events).toHaveLength(1);
+          expect(events[0]).toMatchObject(
+            navStatus._tag === "LoadFailed"
+              ? { type: "failed", url: "data:text/html,…", code: -2, description: "Failed" }
+              : { type: "navigated", snapshot: { navStatus: expected } },
+          );
+          if (navStatus._tag !== "Idle") expect(navStatus.url).toBe(url);
+        }
+      }
     }),
   );
 
