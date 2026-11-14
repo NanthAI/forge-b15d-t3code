@@ -513,6 +513,48 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.effect.each([false, true])(
+  "data pages expose only their media type in load reports and status (desktop: %s)",
+  (desktop) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = desktop;
+        const { broker, tabId } = yield* ready;
+        const other = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const page = desktop ? desktopConnections[0]!.context.page : contexts[0]!.page;
+        const url = `data:text/html;charset="a,b",<p>PAGE CONTENT ${"x".repeat(3_000)}</p>`;
+        yield* Effect.promise(() => page.goto(url));
+        expect(yield* PubSub.take(events)).toMatchObject({
+          type: "navigated",
+          snapshot: {
+            tabId,
+            navStatus: { _tag: "Success", url: "data:text/html,…", title: "test page" },
+          },
+        });
+        for (const target of [tabId, PreviewTabId.make(other.tabId!)]) {
+          const status = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: target,
+            operation: "status",
+            input: {},
+          });
+          expect(status.url).toBe(target === tabId ? "data:text/html,…" : null);
+          expect(status.tabs).toEqual([
+            expect.objectContaining({ tabId, url: "data:text/html,…" }),
+            expect.objectContaining({ tabId: other.tabId, url: null }),
+          ]);
+        }
+        expect(page.url()).toBe(url);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.effect("desktop viewers receive CSS dimensions and can tap, type and scroll", () =>
   Effect.scoped(
     Effect.gen(function* () {
