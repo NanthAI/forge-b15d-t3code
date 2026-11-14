@@ -763,6 +763,69 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([
+  { name: "HTML", url: "data:text/html,<p>private page</p>", expected: "data:text/html,…" },
+  {
+    name: "base64",
+    url: "data:text/html;charset=utf-8;base64,cHJpdmF0ZSBwYWdl",
+    expected: "data:text/html,…",
+  },
+  { name: "default media type", url: "DATA:,private page", expected: "data:,…" },
+  {
+    name: "long payload",
+    url: "data:text/html," + "private page".repeat(300),
+    expected: "data:text/html,…",
+  },
+  {
+    name: "HTTPS",
+    url: "https://example.com/data:report,2026",
+    expected: "https://example.com/data:report,2026",
+  },
+])("reports a desktop page URL without its data payload ($name)", ({ url, expected }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const page = desktopConnections[0]!.context.page;
+      yield* Effect.promise(() => page.goto(url));
+      let event = yield* PubSub.take(events);
+      while (
+        event.type !== "navigated" ||
+        event.tabId !== opened.tabId ||
+        event.snapshot.navStatus._tag !== "Success"
+      ) {
+        event = yield* PubSub.take(events);
+      }
+      expect(event.snapshot.navStatus.url).toBe(expected);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(opened.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe(expected);
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(other.url).toBeNull();
+      expect(other.tabs).toContainEqual(
+        expect.objectContaining({ tabId: opened.tabId, url: expected }),
+      );
+      expect(page.url()).toBe(url);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("reports a pending dialog without evaluating the page and resolves it explicitly", () =>
   Effect.scoped(
     Effect.gen(function* () {
