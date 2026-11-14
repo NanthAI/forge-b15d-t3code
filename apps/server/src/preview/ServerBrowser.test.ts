@@ -508,6 +508,48 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a desktop data page reports only its media type in load reports and status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId: blankTabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const tabId = PreviewTabId.make(opened.tabId!);
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      yield* Effect.promise(() => page.goto("data:text/html;charset=utf-8,<p>PAGE_CONTENT</p>"));
+      let loaded = yield* PubSub.take(events);
+      while (
+        loaded.type !== "navigated" ||
+        loaded.tabId !== tabId ||
+        loaded.snapshot.navStatus._tag !== "Success"
+      )
+        loaded = yield* PubSub.take(events);
+      expect(loaded.snapshot.navStatus).toEqual({
+        _tag: "Success",
+        url: "data:text/html,…",
+        title: "test page",
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual([
+        expect.objectContaining({ tabId: blankTabId, url: null }),
+        expect.objectContaining({ tabId, url: "data:text/html,…" }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
