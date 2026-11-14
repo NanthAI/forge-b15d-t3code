@@ -756,6 +756,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         status: OrchestrationV2ExecutionNode["status"],
         startedAt: DateTime.Utc,
         completedAt: DateTime.Utc | null,
+        parentNodeId = turn.turnInput.rootNodeId,
       ) =>
         emit({
           type: "node.updated",
@@ -767,7 +768,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             }),
             threadId: turn.turnInput.threadId,
             runId: turn.turnInput.runId,
-            parentNodeId: turn.turnInput.rootNodeId,
+            parentNodeId,
             rootNodeId: turn.turnInput.rootNodeId,
             kind,
             status,
@@ -979,6 +980,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         phase: "start" | "update" | "end",
       ) {
         const toolCallId = recordString(event, "toolCallId");
+        const parentToolCallId = recordString(event, "parentToolCallId");
         const toolName = recordString(event, "toolName") ?? "tool";
         if (toolCallId === undefined) return;
         if (phase === "start") {
@@ -1007,9 +1009,22 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           status,
           startedAt,
           completed ? emittedAt : null,
+          parentToolCallId === undefined
+            ? turn.turnInput.rootNodeId
+            : idAllocator.derive.nodeFromProviderItem({
+                driver: PI_PROVIDER,
+                nativeItemId: parentToolCallId,
+              }),
         );
         const shared = {
           ...base,
+          parentItemId:
+            parentToolCallId === undefined
+              ? null
+              : idAllocator.derive.turnItemFromProviderItem({
+                  driver: PI_PROVIDER,
+                  nativeItemId: parentToolCallId,
+                }),
           status,
           completedAt: completed ? emittedAt : null,
         } as const;
