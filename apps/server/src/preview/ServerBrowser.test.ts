@@ -516,7 +516,7 @@ it.live("a desktop page that loaded before the server attached reports its loade
       const url = "https://example.com/loaded";
       using _connect = vi
         .spyOn(ServerBrowserContexts.prototype, "connectDesktopPage")
-        .mockImplementation(async function (endpoint) {
+        .mockImplementation(async function (this: ServerBrowserContexts, endpoint) {
           const connected = await connectDesktopPage.call(this, endpoint);
           await connected.page.goto(url);
           return connected;
