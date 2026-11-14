@@ -5,9 +5,83 @@ import {
   type CDPSession,
   type Page,
 } from "playwright-core";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vite-plus/test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vite-plus/test";
 
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+
+describe("desktop viewport reads", () => {
+  it("keeps CSS dimensions when metrics fail or contain invalid sizes", async () => {
+    const send = vi.fn().mockResolvedValue({
+      cssLayoutViewport: { clientWidth: 960, clientHeight: 600 },
+      layoutViewport: { clientWidth: 1920, clientHeight: 1200 },
+    });
+    const changed = vi.fn();
+    const reader = ServerBrowserPage.createViewportReader(
+      { send } as unknown as CDPSession,
+      changed,
+    );
+    expect(await reader.read()).toEqual({ width: 960, height: 600 });
+    send.mockRejectedValueOnce(new Error("navigating"));
+    expect(await reader.read()).toEqual({ width: 960, height: 600 });
+    for (const size of [
+      undefined,
+      { clientWidth: 0, clientHeight: 600 },
+      { clientWidth: 960, clientHeight: NaN },
+      { clientWidth: Infinity, clientHeight: 600 },
+    ]) {
+      send.mockResolvedValueOnce({ cssLayoutViewport: size });
+      expect(await reader.read()).toEqual({ width: 960, height: 600 });
+    }
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds waits during a dialog, shares the outstanding read and publishes its late size", async () => {
+    vi.useFakeTimers();
+    using _timers = { [Symbol.dispose]: () => vi.useRealTimers() };
+    const stalled = Promise.withResolvers<unknown>();
+    const send = vi
+      .fn()
+      .mockReturnValueOnce(stalled.promise)
+      .mockResolvedValue({
+        cssLayoutViewport: { clientWidth: 800, clientHeight: 500 },
+      });
+    const changed = vi.fn();
+    const reader = ServerBrowserPage.createViewportReader(
+      { send } as unknown as CDPSession,
+      changed,
+    );
+    const first = reader.read();
+    const concurrent = reader.read();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await first).toBeNull();
+    expect(await concurrent).toBeNull();
+    expect(await reader.read()).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+    stalled.resolve({ cssLayoutViewport: { clientWidth: 1000, clientHeight: 700 } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reader.current()).toEqual({ width: 1000, height: 700 });
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(await reader.read()).toEqual({ width: 800, height: 500 });
+    const blockedAgain = Promise.withResolvers<unknown>();
+    send.mockReturnValueOnce(blockedAgain.promise);
+    const cached = reader.read();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await cached).toEqual({ width: 800, height: 500 });
+    expect(await reader.read()).toEqual({ width: 800, height: 500 });
+    expect(send).toHaveBeenCalledTimes(3);
+    blockedAgain.reject(new Error("closed"));
+    await blockedAgain.promise.catch(() => {});
+  });
+});
 
 describe("server browser element refs", () => {
   let browser: Browser;
@@ -267,6 +341,23 @@ describe("server browser snapshot screenshot", () => {
   });
   afterEach(async () => {
     await context.close();
+  });
+
+  it("reads CSS dimensions from a native-size page without a Playwright viewport", async () => {
+    const native = await browser.newContext({ viewport: null });
+    try {
+      const page = await native.newPage();
+      expect(page.viewportSize()).toBeNull();
+      const reader = ServerBrowserPage.createViewportReader(
+        await native.newCDPSession(page),
+        () => {},
+      );
+      expect(await reader.read()).toEqual(
+        await page.evaluate("({ width: innerWidth, height: innerHeight })"),
+      );
+    } finally {
+      await native.close();
+    }
   });
 
   // Blue on the left half and red on the right, so a mirrored left half shows up on the right.

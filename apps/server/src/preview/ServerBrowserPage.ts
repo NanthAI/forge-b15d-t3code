@@ -457,6 +457,47 @@ export const captureViewport = async (
   return data;
 };
 
+export const createViewportReader = (cdp: CDPSession, onSize: () => void) => {
+  let current: { width: number; height: number } | null = null;
+  let pending: Promise<void> | null = null;
+  const read = async () => {
+    if (pending === null) {
+      const measured = cdp
+        .send("Page.getLayoutMetrics")
+        .then(({ cssLayoutViewport: size }) => {
+          if (
+            !size ||
+            !Number.isFinite(size.clientWidth) ||
+            !Number.isFinite(size.clientHeight) ||
+            size.clientWidth <= 0 ||
+            size.clientHeight <= 0
+          )
+            return;
+          const next = { width: size.clientWidth, height: size.clientHeight };
+          if (current?.width === next.width && current.height === next.height) return;
+          current = next;
+          onSize();
+        })
+        .catch(constVoid)
+        .finally(() => {
+          pending = null;
+        });
+      // Dialogs can stall CDP. Bound callers' wait, but keep the read in flight until
+      // Chromium answers so frames cannot pile up more requests behind the dialog.
+      pending = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 2_000);
+        void measured.then(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    await pending;
+    return current;
+  };
+  return { read, current: () => current };
+};
+
 /** Runs in the page's own isolated world, as the server has no image library. */
 const SHRINK_PNG = `async function (png, width, height) {
   const bytes = Uint8Array.from(atob(png), (char) => char.charCodeAt(0));
