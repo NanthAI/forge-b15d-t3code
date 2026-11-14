@@ -2301,6 +2301,95 @@ describe("PiAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const rootNodeId = NodeId.make(`node:run:${THREAD_ID}:1:root`);
+      const cases = [
+        { toolCallId: "call_code", toolName: "codemode", phases: ["start"], isError: false },
+        {
+          toolCallId: "call_code/1",
+          parentToolCallId: "call_code",
+          toolName: "read",
+          phases: ["start", "update", "end"],
+          isError: false,
+        },
+        {
+          toolCallId: "opaque-command-id",
+          parentToolCallId: "call_code",
+          toolName: "bash",
+          phases: ["start", "update", "end"],
+          isError: true,
+        },
+        {
+          toolCallId: "early-update",
+          parentToolCallId: "call_code/1",
+          toolName: "write",
+          phases: ["update", "start", "end"],
+          isError: false,
+        },
+        {
+          toolCallId: "call_code/top-level",
+          toolName: "read",
+          phases: ["start", "update", "end"],
+          isError: false,
+        },
+      ];
+      for (const tool of cases) {
+        const parent =
+          tool.parentToolCallId === undefined
+            ? undefined
+            : { driver: PI_PROVIDER, nativeItemId: tool.parentToolCallId };
+        for (const phase of tool.phases) {
+          yield* fake.emit({
+            type: `tool_execution_${phase}`,
+            toolCallId: tool.toolCallId,
+            toolName: tool.toolName,
+            ...(parent === undefined ? {} : { parentToolCallId: tool.parentToolCallId }),
+            args: { path: "nested.txt", content: "nested", command: "exit 1" },
+            partialResult: { content: [{ type: "text", text: "running" }] },
+            result: { content: [{ type: "text", text: "done" }] },
+            isError: tool.isError,
+          });
+          const node = yield* takeEvent(
+            (event) =>
+              event.type === "node.updated" &&
+              event.node.nativeItemRef?.nativeId === tool.toolCallId,
+          );
+          assert(node.type === "node.updated");
+          assert.equal(
+            node.node.parentNodeId,
+            parent === undefined ? rootNodeId : idAllocator.derive.nodeFromProviderItem(parent),
+          );
+          assert.equal(node.node.rootNodeId, rootNodeId);
+          const item = yield* takeEvent(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId === tool.toolCallId,
+          );
+          assert(item.type === "turn_item.updated");
+          assert.equal(
+            item.turnItem.parentItemId,
+            parent === undefined ? null : idAllocator.derive.turnItemFromProviderItem(parent),
+          );
+          const status = phase === "end" ? (tool.isError ? "failed" : "completed") : "running";
+          assert.equal(node.node.status, status);
+          assert.equal(item.turnItem.status, status);
+        }
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("observes official subagent results without inventing child threads", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
