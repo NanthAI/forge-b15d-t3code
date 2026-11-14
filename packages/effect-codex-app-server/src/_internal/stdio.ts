@@ -1,6 +1,9 @@
+import * as NodeUtil from "node:util";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
@@ -9,6 +12,41 @@ import { ChildProcessSpawner } from "effect/process";
 import * as CodexError from "../errors.ts";
 
 const encoder = new TextEncoder();
+const STDERR_TAIL_BYTES = 8 * 1024;
+
+const stderrExcerpt = (bytes: Uint8Array): string | undefined => {
+  const lines = NodeUtil.stripVTControlCharacters(new TextDecoder().decode(bytes))
+    .split(/[\r\n]+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line.length > 0);
+  const line =
+    lines.findLast((line) => /^(?:[\w.]*Error(?: \[ERR_[^\]]+\])?|error|fatal):/i.test(line)) ??
+    lines.at(-1);
+  return line?.slice(0, 512);
+};
+
+export const captureStderr = Effect.fn("captureStderr")(function* (
+  stream: ChildProcessSpawner.ChildProcessHandle["stderr"],
+) {
+  let tail: Uint8Array = new Uint8Array(0);
+  const fiber = yield* Stream.runForEach(stream, (chunk) =>
+    Effect.sync(() => {
+      const retained = tail.subarray(
+        Math.max(0, tail.byteLength + chunk.byteLength - STDERR_TAIL_BYTES),
+      );
+      const incoming = chunk.subarray(-STDERR_TAIL_BYTES);
+      const next = new Uint8Array(retained.byteLength + incoming.byteLength);
+      next.set(retained);
+      next.set(incoming, retained.byteLength);
+      tail = next;
+    }),
+  ).pipe(Effect.ignore, Effect.forkScoped);
+
+  return Fiber.await(fiber).pipe(
+    Effect.timeoutOption("250 millis"),
+    Effect.map(() => stderrExcerpt(tail)),
+  );
+});
 
 export const makeChildStdio = (handle: ChildProcessSpawner.ChildProcessHandle) =>
   Stdio.make({
@@ -49,15 +87,22 @@ type ChildProcessTerminationHandle = Pick<
   "exitCode" | "pid"
 >;
 
-export const makeTerminationError = (
+export const makeTerminationError = Effect.fn("makeTerminationError")(function* (
   handle: ChildProcessTerminationHandle,
-): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
-    onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
-        pid: handle.pid,
-        cause,
-      }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
+  stderr?: Effect.Effect<string | undefined>,
+): Effect.fn.Return<CodexError.CodexAppServerError> {
+  const status = yield* Effect.result(handle.exitCode);
+  if (Result.isFailure(status)) {
+    return new CodexError.CodexAppServerTransportError({
+      operation: "read-process-exit-status",
+      pid: handle.pid,
+      cause: status.failure,
+    });
+  }
+  const excerpt = stderr === undefined ? undefined : yield* stderr;
+  return new CodexError.CodexAppServerProcessExitedError({
+    code: status.success,
+    pid: handle.pid,
+    ...(excerpt === undefined ? {} : { stderr: excerpt }),
   });
+});
