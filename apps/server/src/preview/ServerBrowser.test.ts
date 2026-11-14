@@ -495,29 +495,50 @@ it.live.each(["desktop" as const, undefined])(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const { broker } = yield* ready;
-      const manager = yield* Manager.PreviewManager;
-      const events = yield* manager.subscribeEvents;
-      desktopRendersNext = true;
-      desktopInitialUrl = "https://example.com/loaded";
-      const opened = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        operation: "open",
-        input: { url: "https://example.com/start", reuseExistingTab: false, show: false },
-      });
-      let event = yield* PubSub.take(events);
-      while (event.type !== "navigated") event = yield* PubSub.take(events);
-      const navStatus = { _tag: "Success", url: desktopInitialUrl, title: "test page" };
-      expect(event).toMatchObject({ tabId: opened.tabId, snapshot: { navStatus } });
-      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
-      expect(sessions.find((session) => session.tabId === opened.tabId)).toMatchObject({
-        navStatus,
-      });
-    }),
-  ).pipe(Effect.provide(layer)),
+it.live.each([
+  { url: "https://example.com/loaded", reportedUrl: "https://example.com/loaded" },
+  {
+    url: `data:text/html;charset=${"x".repeat(2_100)},<p>page contents</p>`,
+    reportedUrl: "data:text/html,…",
+  },
+  { url: "data:;base64,cGFnZSBjb250ZW50cw==", reportedUrl: "data:,…" },
+])(
+  "a desktop page loaded before attachment reports its title and safe URL ($reportedUrl)",
+  ({ url, reportedUrl }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        desktopRendersNext = true;
+        desktopInitialUrl = url;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { url: "https://example.com/start", reuseExistingTab: false, show: false },
+        });
+        let event = yield* PubSub.take(events);
+        while (event.type !== "navigated") event = yield* PubSub.take(events);
+        const navStatus = { _tag: "Success", url: reportedUrl, title: "test page" };
+        expect(event).toMatchObject({ tabId: opened.tabId, snapshot: { navStatus } });
+        const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+        expect(sessions.find((session) => session.tabId === opened.tabId)).toMatchObject({
+          navStatus,
+        });
+        expect(opened.url).toBe(reportedUrl);
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make(opened.tabId!),
+          operation: "status",
+          input: {},
+        });
+        expect(status.url).toBe(reportedUrl);
+        expect(status.tabs).toEqual([
+          expect.objectContaining({ tabId, url: null }),
+          expect.objectContaining({ tabId: opened.tabId, url: reportedUrl }),
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("desktop viewers receive CSS dimensions and can tap, type and scroll", () =>
