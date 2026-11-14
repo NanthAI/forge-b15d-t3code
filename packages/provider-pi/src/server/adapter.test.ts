@@ -1991,6 +1991,74 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const rootNodeId = NodeId.make(`node:run:${THREAD_ID}:1:root`);
+      const cases = [
+        { toolCallId: "call_code", toolName: "code", parentToolCallId: undefined, isError: false },
+        {
+          toolCallId: "call_code/1",
+          toolName: "read",
+          parentToolCallId: "call_code",
+          isError: false,
+        },
+        { toolCallId: "opaque-id", toolName: "bash", parentToolCallId: "call_code", isError: true },
+        {
+          toolCallId: "deep-child",
+          toolName: "write",
+          parentToolCallId: "call_code/1",
+          isError: false,
+        },
+        { toolCallId: "legacy/1", toolName: "read", parentToolCallId: undefined, isError: false },
+      ];
+      for (const test of cases) {
+        for (const phase of ["update", "start", "update", "end"] as const) {
+          yield* fake.emit({
+            type: `tool_execution_${phase}`,
+            ...test,
+            args: { path: "file.txt", command: "pwd", content: "hello" },
+          });
+          const nodeEvent = yield* takeEvent((event) => event.type === "node.updated");
+          if (nodeEvent.type !== "node.updated") return yield* Effect.die("Expected a tool node");
+          const itemEvent = yield* takeEvent((event) => event.type === "turn_item.updated");
+          if (itemEvent.type !== "turn_item.updated")
+            return yield* Effect.die("Expected a tool item");
+          const parent =
+            test.parentToolCallId === undefined
+              ? undefined
+              : {
+                  driver: PI_PROVIDER,
+                  nativeItemId: test.parentToolCallId,
+                };
+          assert.equal(
+            nodeEvent.node.parentNodeId,
+            parent === undefined ? rootNodeId : ids.derive.nodeFromProviderItem(parent),
+          );
+          assert.equal(
+            itemEvent.turnItem.parentItemId,
+            parent === undefined ? null : ids.derive.turnItemFromProviderItem(parent),
+          );
+          assert.equal(nodeEvent.node.rootNodeId, rootNodeId);
+          assert.equal(itemEvent.turnItem.nodeId, nodeEvent.node.id);
+          const status = phase === "end" ? (test.isError ? "failed" : "completed") : "running";
+          assert.equal(nodeEvent.node.status, status);
+          assert.equal(itemEvent.turnItem.status, status);
+        }
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("presents explicitly namespaced MCP extension tools", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
