@@ -59,6 +59,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
       context.page.viewportSize.mockReturnValue(null);
+      if (desktopInitialUrl !== null) await context.page.goto(desktopInitialUrl);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -288,6 +289,7 @@ let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopViewportRead: (() => Promise<Record<string, unknown>>) | null = null;
 let desktopRendersNext = false;
+let desktopInitialUrl: string | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -401,6 +403,7 @@ beforeEach(() => {
   desktopTabs.clear();
   desktopRendersNext = false;
   desktopViewportRead = null;
+  desktopInitialUrl = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -707,6 +710,35 @@ it.live("a stalled viewer retains viewport, control and reconnect state when its
       let output = yield* Queue.take(viewer.output);
       while (output._tag === "frame") output = yield* Queue.take(viewer.output);
       expect(output._tag).toBe("reconnect");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      desktopInitialUrl = "http://localhost:5173/loaded";
+      const opened = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url: "http://localhost:5173/redirect",
+      });
+      yield* browser.attachViewer(viewerInput(opened.tabId, false));
+
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated" || event.tabId !== opened.tabId) {
+        event = yield* PubSub.take(events);
+      }
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual({
+        _tag: "Success",
+        url: desktopInitialUrl,
+        title: "test page",
+      });
     }),
   ).pipe(Effect.provide(layer)),
 );
