@@ -150,4 +150,5 @@ Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR
 Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
 
 Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+- overlapTask5: oxlint-plugin-t3code
 - overlapTask1: packages/provider-core
