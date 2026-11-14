@@ -31,6 +31,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
@@ -169,6 +170,7 @@ interface FakePi {
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
+  readonly queueClearResult: (result: PiRpcRecord | null) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -197,6 +199,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
+  const clearResults: Array<PiRpcRecord | null> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -229,6 +232,10 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       success: true,
     };
     switch (record["type"]) {
+      case "clear_queue": {
+        const result = clearResults.shift();
+        return result === null ? null : { ...base, ...result };
+      }
       case "get_state":
         if (failState) {
           failState = false;
@@ -386,6 +393,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       isStreaming = streaming;
     },
     queueStats: (data) => statsQueue.push(data),
+    queueClearResult: (result) => clearResults.push(result),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -3874,6 +3882,83 @@ describe("PiAdapterV2", () => {
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each(
+    [false, true].flatMap((requestRuntimeRestart) =>
+      (["cleared", "unsupported", "failed", "timeout"] as const).map((result) => ({
+        requestRuntimeRestart,
+        result,
+      })),
+    ),
+  )(
+    "clears Pi's native queue before Stop, restart=$requestRuntimeRestart, result=$result",
+    ({ requestRuntimeRestart, result }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.emit({ type: "agent_start" });
+        const running = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        assert.isTrue(running.type === "provider_turn.updated");
+        if (running.type !== "provider_turn.updated") return;
+        fake.queueClearResult(
+          result === "cleared"
+            ? { data: { steering: ["Steer one", "  "], followUp: ["Follow-up one"] } }
+            : result === "timeout"
+              ? null
+              : {
+                  success: false,
+                  error: result === "unsupported" ? "Unknown command: clear_queue" : "clear failed",
+                },
+        );
+        const beforeStop = fake.allRequests().length;
+        const stopping = yield* runtime
+          .interruptTurn({
+            providerThread,
+            providerTurnId: running.providerTurn.id,
+            requestRuntimeRestart,
+          })
+          .pipe(Effect.forkChild);
+        yield* fake.takeRequest("clear_queue");
+        if (result === "timeout") {
+          assert.isFalse(fake.allRequests().some((record) => record["type"] === "abort"));
+          yield* TestClock.adjust("2 seconds");
+        }
+        yield* Fiber.join(stopping);
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .slice(beforeStop, beforeStop + 2)
+            .map((record) => record["type"]),
+          ["clear_queue", "abort"],
+        );
+        if (!requestRuntimeRestart) yield* fake.emit({ type: "agent_settled" });
+        const notices: string[] = [];
+        const terminal = yield* takeEvent((event) => {
+          if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+            assert.equal(event.turnItem.providerTurnId, running.providerTurn.id);
+            assert.equal(event.turnItem.status, "completed");
+            notices.push(event.turnItem.message);
+          }
+          return event.type === "turn.terminal";
+        });
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+        assert.deepEqual(
+          notices,
+          result === "cleared"
+            ? ["Stopped before Pi read 3 queued messages:\n\n- Steer one\n- Follow-up one"]
+            : [],
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("stops active retry progress when the turn is interrupted", () =>
