@@ -2301,6 +2301,78 @@ describe("PiAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools called through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const rootNodeId = NodeId.make(`node:run:${THREAD_ID}:1:root`);
+      for (const tool of [
+        { toolCallId: "call_code", toolName: "code", parentToolCallId: undefined },
+        { toolCallId: "call_code/1", toolName: "read", parentToolCallId: "call_code" },
+        { toolCallId: "opaque-child", toolName: "bash", parentToolCallId: "call_code/1" },
+        { toolCallId: "failed-edit", toolName: "edit", parentToolCallId: "call_code" },
+        { toolCallId: "nested-write", toolName: "write", parentToolCallId: "call_code" },
+        { toolCallId: "legacy/1", toolName: "read", parentToolCallId: undefined },
+      ]) {
+        for (const phase of ["update", "start", "update", "end"] as const) {
+          const status =
+            phase === "end" ? (tool.toolName === "edit" ? "failed" : "completed") : "running";
+          yield* fake.emit({
+            type: `tool_execution_${phase}`,
+            toolCallId: tool.toolCallId,
+            toolName: tool.toolName,
+            ...(tool.parentToolCallId === undefined
+              ? {}
+              : { parentToolCallId: tool.parentToolCallId }),
+            args: { path: "file.txt", command: "pwd", content: "written" },
+            partialResult: { content: [{ type: "text", text: "working" }] },
+            result: { content: [{ type: "text", text: "done" }] },
+            isError: tool.toolName === "edit",
+          });
+          const node = yield* takeEvent((event) => event.type === "node.updated");
+          if (node.type !== "node.updated") return yield* Effect.die("Expected a tool node");
+          assert.equal(
+            node.node.id,
+            ids.derive.nodeFromProviderItem({ driver: PI_PROVIDER, nativeItemId: tool.toolCallId }),
+          );
+          assert.equal(
+            node.node.parentNodeId,
+            tool.parentToolCallId === undefined
+              ? rootNodeId
+              : ids.derive.nodeFromProviderItem({
+                  driver: PI_PROVIDER,
+                  nativeItemId: tool.parentToolCallId,
+                }),
+          );
+          assert.equal(node.node.rootNodeId, rootNodeId);
+          assert.equal(node.node.status, status);
+          const item = yield* takeEvent((event) => event.type === "turn_item.updated");
+          if (item.type !== "turn_item.updated") return yield* Effect.die("Expected a tool item");
+          assert.equal(item.turnItem.nodeId, node.node.id);
+          assert.equal(
+            item.turnItem.parentItemId,
+            tool.parentToolCallId === undefined
+              ? null
+              : ids.derive.turnItemFromProviderItem({
+                  driver: PI_PROVIDER,
+                  nativeItemId: tool.parentToolCallId,
+                }),
+          );
+          assert.equal(item.turnItem.status, status);
+        }
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("observes official subagent results without inventing child threads", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
