@@ -1,8 +1,11 @@
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
@@ -10,6 +13,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -28,6 +32,50 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       });
       return yield* spawner.spawn(command);
     });
+
+  it.effect("warns once about a notification that fails to decode and keeps dispatching", () =>
+    Effect.gen(function* () {
+      const warnings: Array<{ message: unknown; annotations: Record<string, unknown> }> = [];
+      const logger = Logger.make(({ logLevel, message, fiber }) => {
+        if (logLevel === "Warn") {
+          warnings.push({ message, annotations: fiber.getRef(References.CurrentLogAnnotations) });
+        }
+      });
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio).pipe(Effect.provide(Logger.layer([logger])));
+      const received = yield* Queue.unbounded<unknown>();
+      yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
+        Queue.offer(received, payload).pipe(Effect.asVoid),
+      );
+
+      const sentinel = "private-turn-id-must-not-be-logged";
+      const invalid = { itemId: "item-1", threadId: "thread-1", turnId: sentinel };
+      const valid = { ...invalid, delta: "Hello" };
+      const encoder = new TextEncoder();
+      for (const params of [invalid, invalid, valid]) {
+        yield* Queue.offer(
+          input,
+          encoder.encode(`${JSON.stringify({ method: "item/agentMessage/delta", params })}\n`),
+        );
+      }
+
+      assert.deepEqual(yield* Queue.take(received), valid);
+      assert.equal(yield* Queue.size(received), 0);
+      assert.lengthOf(warnings, 1);
+      assert.include(
+        [warnings[0]!.message].flat(),
+        "Dropped a Codex App Server notification that failed to decode",
+      );
+      assert.deepEqual(warnings[0]!.annotations, {
+        operation: "decode-notification-payload",
+        method: "item/agentMessage/delta",
+        issueCount: 3,
+        issueKinds: ["Composite", "Pointer", "MissingKey"],
+        maximumPathDepth: 1,
+      });
+      assert.notInclude(JSON.stringify(warnings), sentinel);
+    }),
+  );
 
   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
     Effect.gen(function* () {
