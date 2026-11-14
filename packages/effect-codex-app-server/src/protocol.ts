@@ -18,7 +18,8 @@ const isCodexAppServerError = Schema.is(CodexError.CodexAppServerError);
 const MAX_BUFFERED_RAW_MESSAGES = 32;
 // Bound JSONL lines before joining and parsing; the LF delimiter is excluded.
 const MAX_INCOMING_MESSAGE_BYTES = 128 * 1024 * 1024;
-const EXIT_STATUS_GRACE = "250 millis";
+// Allow 250 ms for the exit status and another 250 ms for final stderr diagnostics.
+const EXIT_STATUS_GRACE = "500 millis";
 
 export interface CodexAppServerProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";

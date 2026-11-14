@@ -657,7 +657,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       yield* Queue.take(output);
 
       yield* Queue.end(input);
-      yield* TestClock.adjust("249 millis");
+      yield* TestClock.adjust("499 millis");
       assert.isUndefined(pending.pollUnsafe());
       yield* TestClock.adjust("1 millis");
 
@@ -671,21 +671,26 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 
-  it.effect("reports a process exit that follows input end", () =>
+  it.effect("reports a process exit with final stderr after input end", () =>
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();
-      const exitError = new CodexError.CodexAppServerProcessExitedError({ code: 1, pid: 123 });
+      const exitError = new CodexError.CodexAppServerProcessExitedError({
+        code: 1,
+        pid: 123,
+        stderr: "Error: launcher failed",
+      });
       const exited = yield* Deferred.make<CodexError.CodexAppServerError>();
       const termination = yield* Deferred.make<CodexError.CodexAppServerError>();
       yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
         stdio,
-        terminationError: Deferred.await(exited),
+        terminationError: Deferred.await(exited).pipe(Effect.delay("250 millis")),
         onTermination: (error) => Deferred.succeed(termination, error).pipe(Effect.asVoid),
       });
 
       yield* Queue.end(input);
       yield* TestClock.adjust("100 millis");
       yield* Deferred.succeed(exited, exitError);
+      yield* TestClock.adjust("250 millis");
 
       assert.strictEqual(yield* Deferred.await(termination), exitError);
     }),
