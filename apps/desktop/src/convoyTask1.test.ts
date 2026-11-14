@@ -1,0 +1,9 @@
+import { describe, expect, it } from "vite-plus/test";
+
+import { convoyTask1 } from "./convoyTask1.ts";
+
+describe("convoyTask1", () => {
+  it("returns its name", () => {
+    expect(convoyTask1()).toBe("convoyTask1");
+  });
+});
