@@ -169,6 +169,7 @@ interface FakePi {
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
+  readonly setClearQueueResponse: (response: PiRpcRecord) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -198,6 +199,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
   const allRequests: Array<PiRpcRecord> = [];
+  let clearQueueResponse: PiRpcRecord = { data: { steering: [], followUp: [] } };
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
@@ -229,6 +231,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       success: true,
     };
     switch (record["type"]) {
+      case "clear_queue":
+        return { ...base, ...clearQueueResponse };
       case "get_state":
         if (failState) {
           failState = false;
@@ -386,6 +390,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       isStreaming = streaming;
     },
     queueStats: (data) => statsQueue.push(data),
+    setClearQueueResponse: (response) => {
+      clearQueueResponse = response;
+    },
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -3874,6 +3881,68 @@ describe("PiAdapterV2", () => {
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    { requestRuntimeRestart: false, supported: true },
+    { requestRuntimeRestart: true, supported: true },
+    { requestRuntimeRestart: false, supported: false },
+    { requestRuntimeRestart: true, supported: false },
+  ])(
+    "clears Pi's queue before abort, restart=$requestRuntimeRestart, supported=$supported",
+    ({ requestRuntimeRestart, supported }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.setClearQueueResponse(
+          supported
+            ? { data: { steering: ["Queued steer", "  "], followUp: ["Queued follow-up"] } }
+            : { success: false, error: "Unknown command: clear_queue" },
+        );
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        const running = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        assert.isTrue(running.type === "provider_turn.updated");
+        if (running.type !== "provider_turn.updated") return;
+
+        const beforeStop = fake.allRequests().length;
+        yield* runtime.interruptTurn({
+          providerThread,
+          providerTurnId: running.providerTurn.id,
+          requestRuntimeRestart,
+        });
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .slice(beforeStop, beforeStop + 2)
+            .map((request) => request["type"]),
+          ["clear_queue", "abort"],
+        );
+        if (!requestRuntimeRestart) yield* fake.emit({ type: "agent_settled" });
+        const notices: Array<string> = [];
+        const terminal = yield* takeEvent((event) => {
+          if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+            notices.push(event.turnItem.message);
+          }
+          return event.type === "turn.terminal";
+        });
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+        assert.deepEqual(
+          notices,
+          supported
+            ? ["Stopped before Pi read 3 queued messages:\n\n- Queued steer\n- Queued follow-up"]
+            : [],
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("stops active retry progress when the turn is interrupted", () =>
