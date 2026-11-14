@@ -398,6 +398,32 @@ beforeEach(() => {
   desktopConnections.length = 0;
 });
 
+it.live("redacts a loaded data page in reports and automation status, including the tab list", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      yield* Effect.promise(() =>
+        contexts[0]!.page.goto(`data:text/html,<p>PRIVATE${"x".repeat(3_000)}</p>`),
+      );
+      let loaded;
+      do {
+        loaded = yield* PubSub.take(events);
+      } while (loaded.type !== "navigated" || loaded.snapshot.navStatus._tag !== "Success");
+      expect(loaded.snapshot.navStatus.url).toBe("data:text/html,…");
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("tells the desktop once per thread when its agent turns start and end", () =>
   Effect.gen(function* () {
     yield* ServerBrowser.ServerBrowser;
