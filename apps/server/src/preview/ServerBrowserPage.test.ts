@@ -175,6 +175,13 @@ describe("server browser element refs", () => {
     expect(cut.slice(-8)).toBe("xxx•••••");
   });
 
+  it("reports only the media type of a data page URL while keeping visible text", async () => {
+    await page.goto("data:text/html;charset=utf-8,<p>Page content</p>");
+    const result = await takeSnapshot();
+    expect(result.url).toBe("data:text/html,…");
+    expect(result.visibleText).toBe("Page content");
+  });
+
   it("shows a data: link or blocked data: navigation by media type only", async () => {
     // Chromium keeps raw spaces and quotes in both, so a payload can't be cut at either.
     await page.setContent(`
