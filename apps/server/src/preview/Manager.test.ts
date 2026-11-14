@@ -79,6 +79,46 @@ it.layer(layer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect("keeps only a data: page's media type in status snapshots and events", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const opened = yield* manager.open({ threadId });
+      const collector = yield* collectEvents;
+      for (const navStatus of [
+        { _tag: "Idle" },
+        { _tag: "Loading", url: 'data:text/html;charset="secret,parameter",PAYLOAD', title: "" },
+        { _tag: "Success", url: "data:text/html;base64,UEFZTE9BRA==", title: "Page" },
+        {
+          _tag: "LoadFailed",
+          url: "data:text/html,PAYLOAD",
+          title: "Page",
+          code: -2,
+          description: "ERR_FAILED",
+        },
+      ] as const) {
+        yield* manager.reportStatus({
+          threadId,
+          tabId: opened.tabId,
+          navStatus,
+          canGoBack: true,
+          canGoForward: false,
+        });
+        const expected =
+          navStatus._tag === "Idle" ? navStatus : { ...navStatus, url: "data:text/html,…" };
+        expect((yield* manager.list({ threadId })).sessions[0]?.navStatus).toEqual(expected);
+        const events = yield* collector.drain;
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject(
+          navStatus._tag === "LoadFailed"
+            ? { type: "failed", url: "data:text/html,…" }
+            : { type: "navigated", snapshot: { navStatus: expected } },
+        );
+        expect(JSON.stringify(events)).not.toMatch(/PAYLOAD|UEFZTE9BRA|secret|charset|base64/);
+      }
+    }),
+  );
+
   it.effect("reissues presentation requests without replaying them on navigation", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
