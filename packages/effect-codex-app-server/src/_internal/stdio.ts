@@ -1,5 +1,7 @@
+import * as NodeUtil from "node:util";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
@@ -9,6 +11,36 @@ import { ChildProcessSpawner } from "effect/process";
 import * as CodexError from "../errors.ts";
 
 const encoder = new TextEncoder();
+const STDERR_TAIL_BYTES = 8 * 1024;
+
+export const captureStderr = Effect.fn("CodexAppServerClient.captureStderr")(function* (
+  stderr: ChildProcessSpawner.ChildProcessHandle["stderr"],
+) {
+  let tail = new Uint8Array(0);
+  const drain = yield* Stream.runForEach(stderr, (chunk) =>
+    Effect.sync(() => {
+      const retained = tail.subarray(Math.max(0, tail.length + chunk.length - STDERR_TAIL_BYTES));
+      const incoming = chunk.subarray(-STDERR_TAIL_BYTES);
+      tail = new Uint8Array(retained.length + incoming.length);
+      tail.set(retained);
+      tail.set(incoming, retained.length);
+    }),
+  ).pipe(Effect.ignore, Effect.forkScoped);
+
+  return Fiber.await(drain).pipe(
+    Effect.timeoutOption("250 millis"),
+    Effect.map(() => {
+      const lines = NodeUtil.stripVTControlCharacters(new TextDecoder().decode(tail))
+        .split(/[\r\n]+/)
+        .map((line) => line.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      const line =
+        lines.findLast((line) => /^(?:\w*Error(?: \[ERR_[^\]]+\])?|error|fatal):/.test(line)) ??
+        lines.at(-1);
+      return line?.slice(0, 512);
+    }),
+  );
+});
 
 export const makeChildStdio = (handle: ChildProcessSpawner.ChildProcessHandle) =>
   Stdio.make({
@@ -51,13 +83,25 @@ type ChildProcessTerminationHandle = Pick<
 
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
+  stderr?: Effect.Effect<string | undefined>,
 ): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
+  Effect.matchEffect(handle.exitCode, {
     onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
-        pid: handle.pid,
-        cause,
-      }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
+      Effect.succeed(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-process-exit-status",
+          pid: handle.pid,
+          cause,
+        }),
+      ),
+    onSuccess: (code) =>
+      Effect.map(
+        stderr ?? Effect.void,
+        (excerpt) =>
+          new CodexError.CodexAppServerProcessExitedError({
+            code,
+            pid: handle.pid,
+            ...(typeof excerpt === "string" ? { stderr: excerpt } : {}),
+          }),
+      ),
   });
