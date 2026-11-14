@@ -508,6 +508,51 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("desktop data pages redact load reports and active and inactive tab status URLs", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      const desktop = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      const url = `data:text/html;charset=utf-8,<p>${"PRIVATE".repeat(500)}</p>`;
+      yield* Effect.promise(() => page.goto(url));
+      expect(yield* PubSub.take(events)).toMatchObject({
+        type: "navigated",
+        tabId: desktop.tabId,
+        snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(desktop.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toContainEqual(
+        expect.objectContaining({ tabId: desktop.tabId, url: "data:text/html,…" }),
+      );
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(other.url).toBeNull();
+      expect(other.tabs).toContainEqual(
+        expect.objectContaining({ tabId: desktop.tabId, url: "data:text/html,…" }),
+      );
+      expect(page.url()).toBe(url);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
