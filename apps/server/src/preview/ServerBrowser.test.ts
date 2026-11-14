@@ -543,6 +543,54 @@ it.live("a desktop page that loaded before the server attached reports its loade
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("reports a desktop data: page's media type without its parameters or contents", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      const url = `data:text/html;charset="private,parameter",<p>${"contents".repeat(512)}</p>`;
+      yield* Effect.promise(() => page.goto(url));
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated" || event.tabId !== desktopTab.tabId) {
+        event = yield* PubSub.take(events);
+      }
+      expect.soft(event.snapshot.navStatus).toEqual({
+        _tag: "Success",
+        url: "data:text/html,…",
+        title: "test page",
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(desktopTab.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect.soft(status.url).toBe("data:text/html,…");
+      const otherStatus = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect.soft(otherStatus.url).toBeNull();
+      expect
+        .soft(otherStatus.tabs)
+        .toContainEqual(
+          expect.objectContaining({ tabId: desktopTab.tabId, url: "data:text/html,…" }),
+        );
+      expect(page.url()).toBe(url);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
