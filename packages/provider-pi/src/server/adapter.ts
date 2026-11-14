@@ -756,6 +756,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         status: OrchestrationV2ExecutionNode["status"],
         startedAt: DateTime.Utc,
         completedAt: DateTime.Utc | null,
+        parentNodeId = turn.turnInput.rootNodeId,
       ) =>
         emit({
           type: "node.updated",
@@ -767,7 +768,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             }),
             threadId: turn.turnInput.threadId,
             runId: turn.turnInput.runId,
-            parentNodeId: turn.turnInput.rootNodeId,
+            parentNodeId,
             rootNodeId: turn.turnInput.rootNodeId,
             kind,
             status,
@@ -979,6 +980,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         phase: "start" | "update" | "end",
       ) {
         const toolCallId = recordString(event, "toolCallId");
+        const parentToolCallId = recordString(event, "parentToolCallId");
         const toolName = recordString(event, "toolName") ?? "tool";
         if (toolCallId === undefined) return;
         if (phase === "start") {
@@ -1007,9 +1009,22 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           status,
           startedAt,
           completed ? emittedAt : null,
+          parentToolCallId === undefined
+            ? turn.turnInput.rootNodeId
+            : idAllocator.derive.nodeFromProviderItem({
+                driver: PI_PROVIDER,
+                nativeItemId: parentToolCallId,
+              }),
         );
         const shared = {
           ...base,
+          parentItemId:
+            parentToolCallId === undefined
+              ? null
+              : idAllocator.derive.turnItemFromProviderItem({
+                  driver: PI_PROVIDER,
+                  nativeItemId: parentToolCallId,
+                }),
           status,
           completedAt: completed ? emittedAt : null,
         } as const;
@@ -1212,6 +1227,51 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
+      const emitNotice = Effect.fn("PiAdapter.emitNotice")(function* (
+        turn: ActivePiTurn,
+        message: string,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
+        const fields = baseItemFields(turn, nativeItemId, emittedAt, emittedAt);
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...fields,
+            status: "completed",
+            completedAt: emittedAt,
+            title: message,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      const clearNativeQueue = Effect.fn("PiAdapter.clearNativeQueue")(function* (
+        turn: ActivePiTurn,
+      ) {
+        // Pi <0.84.4 has no clear_queue; clearing must never prevent Stop.
+        const data = yield* request({ type: "clear_queue" }, 2_000).pipe(
+          Effect.orElseSucceed(() => null),
+        );
+        const messages = ["steering", "followUp"].flatMap((key) => {
+          const texts = recordField(data, key);
+          return Array.isArray(texts)
+            ? texts.filter((text): text is string => typeof text === "string")
+            : [];
+        });
+        if (messages.length === 0) return;
+        const listed = messages.map((text) => text.trim()).filter((text) => text.length > 0);
+        yield* emitNotice(
+          turn,
+          `Stopped before Pi read ${messages.length} queued message${messages.length === 1 ? "" : "s"}${
+            listed.length === 0 ? "." : `:\n\n${listed.map((text) => `- ${text}`).join("\n")}`
+          }`,
+        );
+      });
+
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
@@ -1221,21 +1281,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
           if (turn === null || message.length === 0) return;
-          const emittedAt = yield* DateTime.now;
-          const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
-          yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
-          yield* emit({
-            type: "turn_item.updated",
-            driver: PI_PROVIDER,
-            turnItem: {
-              ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
-              status: "completed",
-              completedAt: emittedAt,
-              title: message,
-              type: "system_notice",
-              message,
-            },
-          });
+          yield* emitNotice(turn, message);
           return;
         }
         if (
@@ -2641,6 +2687,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               // Generic abort misses manual compaction; terminate so Stop covers /compact and recovery.
               stopRequested = true;
               if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
+                yield* clearNativeQueue(turn);
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
               // Read rollback tree refs before termination breaks requests; the permit lets in-flight capture finish.
@@ -2654,6 +2701,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               );
               return;
             }
+            yield* clearNativeQueue(turn);
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
