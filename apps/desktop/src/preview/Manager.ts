@@ -21,7 +21,7 @@ import type {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { matchesKeybindingShortcut } from "@t3tools/shared/keybindings";
-import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import { normalizePreviewUrl, withoutDataPayload } from "@t3tools/shared/preview";
 import {
   BrowserWindow,
   ClipboardItem,
@@ -1155,7 +1155,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
 
   const computeNavStatus = (wc: Electron.WebContents): PreviewNavStatus => {
-    const url = wc.getURL();
+    const url = withoutDataPayload(wc.getURL());
     const title = wc.getTitle();
     if (url === "" || url === "about:blank") return { kind: "Idle" };
     // isLoading() includes late iframes whose completion may never clear the tab's loading bar.
@@ -1358,7 +1358,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         update(tabId, {
           navStatus: {
             kind: "LoadFailed",
-            url: validatedUrl || wc.getURL(),
+            url: withoutDataPayload(validatedUrl || wc.getURL()),
             title: wc.getTitle(),
             code,
             description,
