@@ -36,6 +36,7 @@ import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import { ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 vi.mock("./ServerBrowserContexts.ts", () => ({
@@ -504,6 +505,40 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const connectDesktopPage = ServerBrowserContexts.prototype.connectDesktopPage;
+      const url = "https://example.com/loaded";
+      using _connect = vi
+        .spyOn(ServerBrowserContexts.prototype, "connectDesktopPage")
+        .mockImplementation(async function (endpoint) {
+          const connected = await connectDesktopPage.call(this, endpoint);
+          await connected.page.goto(url);
+          return connected;
+        });
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      const { tabId } = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url,
+      });
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated" || event.tabId !== tabId) {
+        event = yield* PubSub.take(events);
+      }
+      const navStatus = { _tag: "Success", url, title: "test page" };
+      expect(event.snapshot.navStatus).toEqual(navStatus);
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === tabId)?.navStatus).toEqual(navStatus);
     }),
   ).pipe(Effect.provide(layer)),
 );
