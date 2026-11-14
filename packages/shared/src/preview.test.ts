@@ -2,11 +2,27 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   normalizePreviewUrl,
+  withoutDataPayload,
   PreviewUrlNormalizationError,
   resolveAddressBarInput,
   previewPdfAssetUrl,
   resolveSearchUrlTemplate,
 } from "./preview.ts";
+
+describe("withoutDataPayload", () => {
+  it.each([
+    ["data:text/html,<p>secret</p>", "data:text/html,…"],
+    ['data:text/plain;charset="private,parameter",secret', "data:text/plain,…"],
+    ["data:image/png;base64,c2VjcmV0", "data:image/png,…"],
+    ["data:,secret", "data:,…"],
+    ["data:secret,payload", "data:,…"],
+    [" DATA:text/html,secret", "data:text/html,…"],
+    ["https://example.com/data:text/html,report", "https://example.com/data:text/html,report"],
+    ["about:blank", "about:blank"],
+  ])("keeps only a data URL's media type: %s", (url, expected) => {
+    expect(withoutDataPayload(url)).toBe(expected);
+  });
+});
 
 describe("previewPdfAssetUrl", () => {
   it.each([
