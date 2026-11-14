@@ -6,7 +6,23 @@ import {
   resolveAddressBarInput,
   previewPdfAssetUrl,
   resolveSearchUrlTemplate,
+  withoutDataPayload,
 } from "./preview.ts";
+
+describe("withoutDataPayload", () => {
+  it.each([
+    ["data:text/html,<p>secret</p>#fragment", "data:text/html,…"],
+    ['data:text/plain;charset="secret,type";base64,c2VjcmV0', "data:text/plain,…"],
+    ["data:,secret", "data:,…"],
+    ["data:secret,content", "data:,…"],
+    [" \u0001Da\tta:\napplication/json,secret", "data:application/json,…"],
+    ["data:text/html,…", "data:text/html,…"],
+    ["https://example.com/data:text/plain,keep", "https://example.com/data:text/plain,keep"],
+    ["about:blank", "about:blank"],
+  ])("keeps only the media type of data URLs (%s)", (url, expected) => {
+    expect(withoutDataPayload(url)).toBe(expected);
+  });
+});
 
 describe("previewPdfAssetUrl", () => {
   it.each([

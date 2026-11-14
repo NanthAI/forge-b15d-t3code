@@ -711,6 +711,46 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("redacts data page URLs in loading, success and failure reports", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const guest = makeFaviconWebContents({ url: "data:text/html,<p>PAYLOAD</p>" });
+        fromId.mockReturnValue(guest.webContents);
+        const reports = yield* Queue.unbounded<PreviewManager.PreviewNavStatus>();
+        yield* manager.subscribeStateChanges((_tabId, state) =>
+          Queue.offer(reports, state.navStatus).pipe(Effect.asVoid),
+        );
+        yield* manager.createTab("tab_data");
+        yield* Queue.clear(reports);
+        guest.setLoading(true);
+        yield* manager.registerWebview("tab_data", 42);
+        expect(yield* Queue.take(reports)).toEqual({
+          kind: "Loading",
+          url: "data:text/html,…",
+          title: "Preview",
+        });
+        guest.setLoading(false);
+        guest.listeners.get("did-stop-loading")?.();
+        expect(yield* Queue.take(reports)).toEqual({
+          kind: "Success",
+          url: "data:text/html,…",
+          title: "Preview",
+        });
+        const fail = guest.listeners.get("did-fail-load")!;
+        for (const validatedUrl of ["data:text/html;charset=PAYLOAD,more", ""]) {
+          fail({} as never, -2 as never, "Failed" as never, validatedUrl as never, true as never);
+          expect(yield* Queue.take(reports)).toEqual({
+            kind: "LoadFailed",
+            url: "data:text/html,…",
+            title: "Preview",
+            code: -2,
+            description: "Failed",
+          });
+        }
+      }),
+    ),
+  );
+
   effectIt.effect("queues navigation until the webview registers", () =>
     withManager((manager) =>
       Effect.gen(function* () {

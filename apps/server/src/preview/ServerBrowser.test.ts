@@ -763,6 +763,27 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live("redacts data page URLs in automation status and its tab list", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      yield* Effect.promise(() => page.goto("data:text/html,<p>PAYLOAD</p>"));
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toContainEqual(
+        expect.objectContaining({ tabId, url: "data:text/html,…" }),
+      );
+      expect(JSON.stringify(status)).not.toContain("PAYLOAD");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("reports a pending dialog without evaluating the page and resolves it explicitly", () =>
   Effect.scoped(
     Effect.gen(function* () {
