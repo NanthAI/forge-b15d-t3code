@@ -28,14 +28,26 @@ Done.`),
     ).toBe('{"message":"literal } brace","nested":{"ok":true}}');
   });
 
-  it("decodes JSON with comments and trailing commas", () => {
-    expect(
-      decodeLenientJson(`{
+  it.each(["\n", "\r\n", "\r"])(
+    "decodes JSON with comments and trailing commas using %j line endings",
+    (lineEnding) => {
+      expect(
+        decodeLenientJson(
+          `{
         // Comments are valid in settings files.
         "enabled": /* See "https://example.com/config" // still in the block */ true,
         "values": [1, 2,],
-      }`),
-    ).toEqual({
+      }`.replaceAll("\n", lineEnding),
+        ),
+      ).toEqual({
+        enabled: true,
+        values: [1, 2],
+      });
+    },
+  );
+
+  it("preserves properties after line comments with mixed line endings", () => {
+    expect(decodeLenientJson('{"enabled":true,// comment\r"values":[1,2],\n}')).toEqual({
       enabled: true,
       values: [1, 2],
     });
