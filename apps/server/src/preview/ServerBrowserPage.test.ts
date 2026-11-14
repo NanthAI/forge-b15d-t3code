@@ -5,7 +5,16 @@ import {
   type CDPSession,
   type Page,
 } from "playwright-core";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vite-plus/test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vite-plus/test";
 
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 
@@ -400,5 +409,128 @@ describe("server browser net errors", () => {
     ["net::ERR_TLS13_DOWNGRADE_DETECTED", "ERR_TLS13_DOWNGRADE_DETECTED", -2],
   ])("reads the whole error name from %j", (errorText, description, code) => {
     expect(ServerBrowserPage.parseNetError(errorText)).toEqual({ description, code });
+  });
+});
+
+describe("desktop viewport sizing", () => {
+  it("reads CSS dimensions without a Playwright viewport across rendering scales and resizes", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const context = await browser.newContext({ viewport: null });
+      const page = await context.newPage();
+      const cdp = await context.newCDPSession(page);
+      expect(page.viewportSize()).toBeNull();
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 640,
+        height: 480,
+        deviceScaleFactor: 3,
+        mobile: false,
+      });
+      const sizes: unknown[] = [];
+      const read = ServerBrowserPage.createViewportReader(cdp, (size) => sizes.push(size));
+      expect(await read()).toEqual({ width: 640, height: 480 });
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 800,
+        height: 600,
+        deviceScaleFactor: 2,
+        mobile: false,
+      });
+      expect(await read()).toEqual({ width: 800, height: 600 });
+      expect(sizes).toEqual([
+        { width: 640, height: 480 },
+        { width: 800, height: 600 },
+      ]);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it("delivers the first size after a dialog that blocked attachment is dismissed", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const context = await browser.newContext({ viewport: null });
+      const page = await context.newPage();
+      const cdp = await context.newCDPSession(page);
+      const opened = Promise.withResolvers<import("playwright-core").Dialog>();
+      page.once("dialog", opened.resolve);
+      const alert = page.evaluate("alert('pause')");
+      const dialog = await opened.promise;
+      const reading = Promise.withResolvers<void>();
+      const send = cdp.send.bind(cdp);
+      using _send = vi.spyOn(cdp, "send").mockImplementation((method, params) => {
+        reading.resolve();
+        return send(method, params);
+      });
+      const measured = Promise.withResolvers<{ width: number; height: number }>();
+      const read = ServerBrowserPage.createViewportReader(cdp, measured.resolve);
+      vi.useFakeTimers();
+      try {
+        const attaching = read();
+        await reading.promise;
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(await attaching).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+      await dialog.dismiss();
+      await alert;
+      expect(await measured.promise).toEqual(
+        await page.evaluate("({ width: innerWidth, height: innerHeight })"),
+      );
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it("bounds blocked reads, retains the last good size, and recovers without overlapping reads", async () => {
+    vi.useFakeTimers();
+    try {
+      const sizes: unknown[] = [];
+      let metrics: unknown = { ratio: 2, width: 960, height: 540 };
+      let blocked: ReturnType<typeof Promise.withResolvers<unknown>> | null = null;
+      const evaluating = Promise.withResolvers<void>();
+      const send = vi.fn(async (method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+        if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { zoom: 1 } };
+        if (blocked) {
+          evaluating.resolve();
+          return { result: { value: await blocked.promise } };
+        }
+        return { result: { value: metrics } };
+      });
+      const read = ServerBrowserPage.createViewportReader(
+        { send } as unknown as CDPSession,
+        (size) => sizes.push(size),
+      );
+      expect(await read()).toEqual({ width: 960, height: 540 });
+      send.mockRejectedValueOnce(new Error("navigation destroyed the context"));
+      expect(await read()).toEqual({ width: 960, height: 540 });
+      metrics = { width: 0, height: NaN };
+      expect(await read()).toEqual({ width: 960, height: 540 });
+      blocked = Promise.withResolvers();
+      const first = read();
+      await evaluating.promise;
+      const concurrent = read();
+      const calls = send.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await first).toEqual({ width: 960, height: 540 });
+      expect(await concurrent).toEqual({ width: 960, height: 540 });
+      const stillBlocked = read();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await stillBlocked).toEqual({ width: 960, height: 540 });
+      expect(send.mock.calls).toHaveLength(calls);
+      blocked.resolve({ ratio: 2, width: 800, height: 600 });
+      await vi.runAllTimersAsync();
+      expect(sizes).toEqual([
+        { width: 960, height: 540 },
+        { width: 800, height: 600 },
+      ]);
+      blocked = null;
+      metrics = { ratio: 2, width: 720, height: 480 };
+      expect(await read()).toEqual({ width: 720, height: 480 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

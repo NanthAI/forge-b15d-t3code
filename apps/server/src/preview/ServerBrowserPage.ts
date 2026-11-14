@@ -444,6 +444,48 @@ const readPageMetrics = async (cdp: CDPSession) => {
   );
 };
 
+/** A blocked renderer keeps one outstanding read; callers can still use the last good size. */
+export const createViewportReader = (
+  cdp: CDPSession,
+  onSize: (size: { width: number; height: number }) => void,
+) => {
+  let size: { width: number; height: number } | null = null;
+  let pending: Promise<void> | null = null;
+  return async () => {
+    if (pending !== null) return size;
+    pending = readPageMetrics(cdp)
+      .then((metrics) => {
+        if (
+          !Number.isFinite(metrics.width) ||
+          !Number.isFinite(metrics.height) ||
+          metrics.width <= 0 ||
+          metrics.height <= 0
+        )
+          return;
+        const next = { width: metrics.width, height: metrics.height };
+        if (size?.width === next.width && size.height === next.height) return;
+        size = next;
+        onSize(next);
+      })
+      .catch(() => {})
+      .finally(() => {
+        pending = null;
+      });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pending,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 2_000);
+        }),
+      ]);
+      return size;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+};
+
 // Never pass a clip scale: Chromium mirrors the top-left of the page into a `backdrop-filter`
 // in any capture it shrinks.
 export const captureViewport = async (
