@@ -60,7 +60,7 @@ export const captureStderr = Effect.fn("CodexAppServerClient.captureStderr")(fun
   const reader = yield* Stream.runForEach(stderr, (chunk) =>
     Effect.sync(() => {
       if (chunk.length >= limit) {
-        tail = chunk.slice(-limit);
+        tail = new Uint8Array(chunk.subarray(-limit));
       } else {
         const retained = tail.subarray(Math.max(0, tail.length + chunk.length - limit));
         const next = new Uint8Array(retained.length + chunk.length);
