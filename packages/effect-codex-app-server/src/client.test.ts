@@ -7,9 +7,10 @@ import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, live } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import * as CodexError from "./errors.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -124,6 +125,28 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       ]);
     }),
   );
+  live("includes the launcher error when the child exits before initialize", () =>
+    Effect.gen(function* () {
+      const reason =
+        "Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest";
+      const handle = yield* makeHandle({ CODEX_APP_SERVER_TEST_LAUNCH_ERROR: reason });
+      const context = yield* Layer.build(CodexClient.layerChildProcess(handle));
+      const client = yield* CodexClient.CodexAppServerClient.pipe(Effect.provide(context));
+      const error = yield* client
+        .request("initialize", {
+          clientInfo: { name: "test", version: "0.0.0" },
+        })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(error, CodexError.CodexAppServerProcessExitedError);
+      assert.equal(error.message, `Codex App Server process exited with code 1: Error: ${reason}`);
+      if (error._tag === "CodexAppServerProcessExitedError") {
+        assert.equal(error.code, 1);
+        assert.equal(error.stderr, `Error: ${reason}`);
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("drains child stderr so large diagnostics cannot block protocol responses", () =>
     Effect.gen(function* () {
       const handle = yield* makeHandle({

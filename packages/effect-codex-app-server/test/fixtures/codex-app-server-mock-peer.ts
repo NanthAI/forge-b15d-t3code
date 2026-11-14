@@ -1,5 +1,9 @@
 import * as NodeOS from "node:os";
 
+if (process.env.CODEX_APP_SERVER_TEST_LAUNCH_ERROR) {
+  throw new Error(process.env.CODEX_APP_SERVER_TEST_LAUNCH_ERROR);
+}
+
 let nextServerRequestId = 10_000;
 let pendingSkillsListRequestId: number | string | null = null;
 let pendingUserInputRequestId: number | null = null;
