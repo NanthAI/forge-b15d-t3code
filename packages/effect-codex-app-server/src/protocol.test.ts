@@ -6,13 +6,14 @@ import * as Schema from "effect/Schema";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexError from "./errors.ts";
 import * as CodexProtocol from "./protocol.ts";
-import { makeInMemoryStdio } from "./_internal/stdio.ts";
+import { captureStderr, makeInMemoryStdio, makeTerminationError } from "./_internal/stdio.ts";
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const encoder = new TextEncoder();
@@ -657,7 +658,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       yield* Queue.take(output);
 
       yield* Queue.end(input);
-      yield* TestClock.adjust("249 millis");
+      yield* TestClock.adjust("499 millis");
       assert.isUndefined(pending.pollUnsafe());
       yield* TestClock.adjust("1 millis");
 
@@ -688,6 +689,36 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       yield* Deferred.succeed(exited, exitError);
 
       assert.strictEqual(yield* Deferred.await(termination), exitError);
+    }),
+  );
+
+  it.effect("reports the process exit even when stderr stays open", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const stderr = yield* captureStderr(
+        Stream.concat(Stream.make(encoder.encode("Error: startup failed\n")), Stream.never),
+      );
+      const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      const termination = yield* Deferred.make<CodexError.CodexAppServerError>();
+      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        terminationError: makeTerminationError(
+          {
+            pid: ChildProcessSpawner.ProcessId(123),
+            exitCode: Deferred.await(exited),
+          },
+          stderr.excerpt,
+        ),
+        onTermination: (error) => Deferred.succeed(termination, error).pipe(Effect.asVoid),
+      });
+
+      yield* Queue.end(input);
+      yield* TestClock.adjust("100 millis");
+      yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(1));
+      yield* TestClock.adjust("250 millis");
+      const error = yield* Deferred.await(termination);
+      assert.instanceOf(error, CodexError.CodexAppServerProcessExitedError);
+      assert.equal(error.stderr, "Error: startup failed");
     }),
   );
 });
