@@ -854,6 +854,12 @@ const make = Effect.gen(function* () {
       tab.loading = false;
       void reportLoaded(tab);
     });
+    // A desktop page may have loaded before its listeners attached.
+    if (desktop)
+      void page
+        .waitForLoadState("load")
+        .then(() => reportLoaded(tab))
+        .catch(constVoid);
     page.on("framenavigated", (frame) => {
       const open = tab.fileChooser;
       if (open) {
