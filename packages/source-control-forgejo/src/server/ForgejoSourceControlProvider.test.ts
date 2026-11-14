@@ -12,6 +12,7 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
 import * as ForgejoCli from "./ForgejoCli.ts";
@@ -1294,6 +1295,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
 
 it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
   const commands: string[] = [];
+  const authHosts: string[] = [];
   const requests: string[] = [];
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
@@ -1351,7 +1353,9 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
     const httpViewer = yield* cli.api({ cwd: "/repo", host: "forgejo.local:3000", path: "user" });
     assert.strictEqual(httpViewer.stdout, '{"login":"maria"}');
     assert.strictEqual(requests.at(-1), "http://forgejo.local:3000/api/v1/user");
+    assert.deepStrictEqual(authHosts, ["http://forgejo.local:3000", "https://forgejo.local:3000"]);
   }).pipe(
+    Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
     Effect.provideService(
       FileSystem.FileSystem,
       FileSystem.makeNoop({
@@ -1403,13 +1407,11 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
-            assert.deepStrictEqual(input.args, [
-              "--host",
-              input.cwd === "/no-remotes"
-                ? "https://forgejo.local:3000"
-                : "http://forgejo.local:3000",
-              "whoami",
-            ]);
+            assert.strictEqual(input.cwd, "/home/test");
+            const host = input.args[1];
+            assert.ok(host);
+            assert.deepStrictEqual(input.args, ["--host", host, "whoami"]);
+            authHosts.push(host);
             return Effect.succeed(processOutput(""));
           },
         },
@@ -1680,6 +1682,7 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.strictEqual(input.cwd, "/home/test");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
@@ -1727,6 +1730,7 @@ it.effect(
               }),
             ),
           ),
+          Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
         );
       }
     }),
