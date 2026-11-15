@@ -154,4 +154,5 @@ Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 - overlapTask3: packages/source-control-forgejo
 - overlapTask5: oxlint-plugin-t3code
 - overlapTask2: evals
+- overlapTask6: infra/relay
 - overlapTask4: apps/desktop
