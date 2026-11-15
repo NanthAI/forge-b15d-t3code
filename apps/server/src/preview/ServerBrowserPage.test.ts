@@ -203,6 +203,17 @@ describe("server browser element refs", () => {
     expect(tree).toContain('/url: "\\"data:text/plain,relative"');
   });
 
+  it.each([
+    ["data:text/html;charset=utf-8,", "data:text/html,…"],
+    ["DATA:text/html;private=value,", "data:text/html,…"],
+    ["data:,", "data:,…"],
+  ])("redacts the snapshot URL of a data page (%s)", async (prefix, expected) => {
+    await page.goto(`${prefix}${encodeURIComponent("<p>PAGE_CONTENT</p>")}`);
+    const result = await takeSnapshot();
+    expect(result.url).toBe(expected);
+    expect(result.visibleText).toContain("PAGE_CONTENT");
+  });
+
   it("redacts a data: link whose scheme a password value would mask", async () => {
     await page.setContent(`
       <input type="password" aria-label="Scheme" value="data">

@@ -487,6 +487,46 @@ it.live.each(["desktop" as const, undefined])(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([false, true])(
+  "redacts data page URLs in load reports and status (desktop: %s)",
+  (desktop) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        desktopRendersNext = desktop;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        const events = yield* manager.subscribeEvents;
+        const page = desktop ? desktopConnections[0]!.context.page : contexts[1]!.page;
+        yield* Effect.promise(() =>
+          page.goto('data:text/html;charset="private",<p>PAGE_CONTENT</p>'),
+        );
+        const event = yield* PubSub.take(events);
+        expect(event).toMatchObject({
+          type: "navigated",
+          snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+        });
+        for (const target of [opened.tabId!, tabId]) {
+          const status = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: PreviewTabId.make(target),
+            operation: "status",
+            input: {},
+          });
+          if (target === opened.tabId) expect(status.url).toBe("data:text/html,…");
+          expect(status.tabs).toContainEqual(
+            expect.objectContaining({ tabId: opened.tabId, url: "data:text/html,…" }),
+          );
+          expect(JSON.stringify(status)).not.toMatch(/PAGE_CONTENT|charset|private/);
+        }
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.effect("a tab the desktop does not draw is marked headless, so the desktop streams it", () =>
   Effect.scoped(
     Effect.gen(function* () {
