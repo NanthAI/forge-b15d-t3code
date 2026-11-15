@@ -155,3 +155,4 @@ Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 - overlapTask2: evals
 - overlapTask7: packages/source-control-gitcafe
 - overlapTask6: infra/relay
+- overlapTask8: packages/provider-cursor
