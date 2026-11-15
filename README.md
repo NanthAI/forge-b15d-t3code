@@ -155,4 +155,5 @@ Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 - overlapTask5: oxlint-plugin-t3code
 - overlapTask2: evals
 - overlapTask6: infra/relay
+- overlapTask7: packages/source-control-gitcafe
 - overlapTask1: packages/provider-core
