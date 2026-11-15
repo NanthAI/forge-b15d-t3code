@@ -2341,7 +2341,12 @@ const make = Effect.gen(function* () {
         const height = Math.min(Math.round(num(message.height)), 2160);
         if (width < 100 || height < 100) return;
         viewer.requestedSize = { width, height, order: ++viewerResizeOrder };
-        if (tab.setting._tag !== "fill" || tab.desktop) return;
+        if (tab.desktop) {
+          await refreshViewport(tab);
+          broadcastViewport(tab);
+          return;
+        }
+        if (tab.setting._tag !== "fill") return;
         const current = tab.page.viewportSize();
         if (current?.width === width && current.height === height) return;
         await tab.page.setViewportSize({ width, height });

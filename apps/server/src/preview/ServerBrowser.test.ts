@@ -761,48 +761,55 @@ it.live("streams desktop CSS dimensions and dispatches phone input without resiz
   ).pipe(Effect.provide(layer)),
 );
 
-it.live("keeps the last desktop size on failed reads and refreshes it from streamed frames", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      using now = vi.spyOn(Date, "now").mockReturnValue(0);
-      desktopRendersNext = true;
-      const { browser, broker, tabId } = yield* ready;
-      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
-      const context = desktopConnections[0]!.context;
-      const cdp = context.sessions[0]!;
-      const send = cdp.send.getMockImplementation()!;
-      for (const failure of [
-        new Error("navigation"),
-        { result: { value: { width: 0, height: 768 } } },
-      ]) {
-        cdp.send.mockImplementation(async (method, input) => {
-          if (method === "Runtime.evaluate") {
-            if (failure instanceof Error) throw failure;
-            return failure;
-          }
-          return send(method, input);
-        });
-        const status = yield* broker.invoke<PreviewAutomationStatus>({
-          scope,
-          tabId,
-          operation: "status",
-          input: {},
-        });
-        expect(status.viewport).toEqual({ width: 1024, height: 768 });
-      }
-      cdp.send.mockImplementation(async (method, input) =>
-        method === "Runtime.evaluate"
-          ? { result: { value: { ratio: 3, width: 800, height: 600 } } }
-          : send(method, input),
-      );
-      yield* Queue.clear(viewer.output);
-      now.mockReturnValue(250);
-      context.sessions.at(-1)!.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: 1 });
-      let output = yield* Queue.take(viewer.output);
-      while (output._tag !== "viewport") output = yield* Queue.take(viewer.output);
-      expect(output).toEqual({ _tag: "viewport", width: 800, height: 600 });
-    }),
-  ).pipe(Effect.provide(layer)),
+it.live.each(["frame", "resize"])(
+  "keeps the last desktop size on failed reads and refreshes on %s",
+  (trigger) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        using now = vi.spyOn(Date, "now").mockReturnValue(0);
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        const context = desktopConnections[0]!.context;
+        const cdp = context.sessions[0]!;
+        const send = cdp.send.getMockImplementation()!;
+        for (const failure of [
+          new Error("navigation"),
+          { result: { value: { width: 0, height: 768 } } },
+        ]) {
+          cdp.send.mockImplementation(async (method, input) => {
+            if (method === "Runtime.evaluate") {
+              if (failure instanceof Error) throw failure;
+              return failure;
+            }
+            return send(method, input);
+          });
+          const status = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          });
+          expect(status.viewport).toEqual({ width: 1024, height: 768 });
+        }
+        cdp.send.mockImplementation(async (method, input) =>
+          method === "Runtime.evaluate"
+            ? { result: { value: { ratio: 3, width: 800, height: 600 } } }
+            : send(method, input),
+        );
+        yield* Queue.clear(viewer.output);
+        now.mockReturnValue(250);
+        if (trigger === "frame") {
+          context.sessions.at(-1)!.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: 1 });
+        } else {
+          yield* viewer.input({ type: "takeControl" });
+          yield* viewer.input({ type: "resize", width: 390, height: 844 });
+        }
+        let output = yield* Queue.take(viewer.output);
+        while (output._tag !== "viewport") output = yield* Queue.take(viewer.output);
+        expect(output).toEqual({ _tag: "viewport", width: 800, height: 600 });
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("bounds a desktop size read blocked by a dialog and delivers its late result", () =>
