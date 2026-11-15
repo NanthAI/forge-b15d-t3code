@@ -58,6 +58,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext(undefined, true);
+      if (desktopPageUrl) await context.page.goto(desktopPageUrl);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -289,6 +290,7 @@ let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
 let layoutMetricsResponse: (() => Promise<Record<string, unknown>>) | null = null;
+let desktopPageUrl: string | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -402,6 +404,7 @@ beforeEach(() => {
   desktopTabs.clear();
   desktopRendersNext = false;
   layoutMetricsResponse = null;
+  desktopPageUrl = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -495,6 +498,46 @@ it.live.each(["desktop" as const, undefined])(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([false, true])(
+  "redacts data page URLs in load reports and status (desktop: %s)",
+  (desktop) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        desktopRendersNext = desktop;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        const events = yield* manager.subscribeEvents;
+        const page = desktop ? desktopConnections[0]!.context.page : contexts[1]!.page;
+        yield* Effect.promise(() =>
+          page.goto('data:text/html;charset="private",<p>PAGE_CONTENT</p>'),
+        );
+        const event = yield* PubSub.take(events);
+        expect(event).toMatchObject({
+          type: "navigated",
+          snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+        });
+        for (const target of [opened.tabId!, tabId]) {
+          const status = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: PreviewTabId.make(target),
+            operation: "status",
+            input: {},
+          });
+          if (target === opened.tabId) expect(status.url).toBe("data:text/html,…");
+          expect(status.tabs).toContainEqual(
+            expect.objectContaining({ tabId: opened.tabId, url: "data:text/html,…" }),
+          );
+          expect(JSON.stringify(status)).not.toMatch(/PAGE_CONTENT|charset|private/);
+        }
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.effect("a tab the desktop does not draw is marked headless, so the desktop streams it", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -512,6 +555,42 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      desktopPageUrl = "https://example.com/already-loaded";
+      const opened = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        url: desktopPageUrl,
+        automationOwner: scope.thread.providerSessionId,
+      });
+      yield* browser.attachViewer(viewerInput(opened.tabId, true));
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(opened.tabId),
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({ url: desktopPageUrl, title: "test page", loading: false });
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated" || event.tabId !== opened.tabId) {
+        event = yield* PubSub.take(events);
+      }
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual({
+        _tag: "Success",
+        url: desktopPageUrl,
+        title: "test page",
+      });
     }),
   ).pipe(Effect.provide(layer)),
 );
