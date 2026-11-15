@@ -700,6 +700,36 @@ it.effect("stalled viewers retain viewport, control, and reconnect messages", ()
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a desktop data: page reports only its media type in load reports and status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      yield* Effect.promise(() =>
+        page.goto('data:text/html;charset="private,parameter",<p>private page contents</p>'),
+      );
+      const loaded = yield* PubSub.take(events);
+      expect(loaded).toMatchObject({
+        type: "navigated",
+        snapshot: {
+          navStatus: { _tag: "Success", url: "data:text/html,…", title: "test page" },
+        },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
