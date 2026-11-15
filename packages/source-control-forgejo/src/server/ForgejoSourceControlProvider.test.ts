@@ -13,6 +13,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as ForgejoPullRequestProvider from "./ForgejoPullRequestProvider.ts";
@@ -1294,6 +1295,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
 
 it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
   const commands: string[] = [];
+  const authHosts: string[] = [];
   const requests: string[] = [];
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
@@ -1351,6 +1353,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
     const httpViewer = yield* cli.api({ cwd: "/repo", host: "forgejo.local:3000", path: "user" });
     assert.strictEqual(httpViewer.stdout, '{"login":"maria"}');
     assert.strictEqual(requests.at(-1), "http://forgejo.local:3000/api/v1/user");
+    assert.deepStrictEqual(authHosts, ["http://forgejo.local:3000", "https://forgejo.local:3000"]);
   }).pipe(
     Effect.provideService(
       FileSystem.FileSystem,
@@ -1403,11 +1406,10 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
+            authHosts.push(input.args[1]!);
             assert.deepStrictEqual(input.args, [
               "--host",
-              input.cwd === "/no-remotes"
-                ? "https://forgejo.local:3000"
-                : "http://forgejo.local:3000",
+              authHosts.length === 2 ? "https://forgejo.local:3000" : "http://forgejo.local:3000",
               "whoami",
             ]);
             return Effect.succeed(processOutput(""));
@@ -1546,10 +1548,12 @@ it.effect("handles fj mutation statuses without retrying failures or reading abs
         if (result._tag === "Success") assert.strictEqual(result.success.stdout, "");
         if (result._tag === "Failure") {
           assert.strictEqual(result.failure.command, "fj");
+          assert.strictEqual(result.failure.cwd, "/repo");
           assert.strictEqual(result.failure.httpStatus, status);
         }
         assert.strictEqual(writes, 1);
       }).pipe(
+        Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
         Effect.provideService(
           FileSystem.FileSystem,
           FileSystem.makeNoop({
@@ -1592,6 +1596,7 @@ it.effect("handles fj mutation statuses without retrying failures or reading abs
                   "fj",
                   "a failed mutation must never switch accounts or CLI",
                 );
+                assert.strictEqual(input.cwd, "/home/test");
                 return Effect.succeed(processOutput(""));
               },
             },
@@ -1636,6 +1641,7 @@ it.effect(
           );
           assert.include(commands, "fj version");
         }).pipe(
+          Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
           Effect.provide(
             Layer.mergeAll(
               Layer.mock(ForgejoCli.ForgejoCli)({
@@ -1680,6 +1686,7 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.strictEqual(input.cwd, "/home/test");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
