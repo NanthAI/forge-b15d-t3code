@@ -398,6 +398,38 @@ beforeEach(() => {
   desktopConnections.length = 0;
 });
 
+it.live("a desktop data: page reports only its media type in load reports and status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      yield* Effect.promise(() =>
+        page.goto(`data:text/html;charset=utf-8,<p>${"PAYLOAD".repeat(400)}</p>`),
+      );
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated" || event.snapshot.navStatus._tag !== "Success")
+        event = yield* PubSub.take(events);
+      expect(event.snapshot.navStatus).toEqual({
+        _tag: "Success",
+        url: "data:text/html,…",
+        title: "test page",
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+      expect(page.url()).toContain("PAYLOAD");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("tells the desktop once per thread when its agent turns start and end", () =>
   Effect.gen(function* () {
     yield* ServerBrowser.ServerBrowser;
