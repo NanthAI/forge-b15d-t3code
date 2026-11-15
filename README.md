@@ -151,4 +151,5 @@ Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg
 
 Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 - overlapTask4: apps/desktop
+- overlapTask1: packages/provider-core
 - overlapTask3: packages/source-control-forgejo
