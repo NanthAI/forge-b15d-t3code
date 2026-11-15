@@ -444,6 +444,14 @@ const readPageMetrics = async (cdp: CDPSession) => {
   );
 };
 
+export const cssViewport = async (cdp: CDPSession) => {
+  const { width, height } = await readPageMetrics(cdp);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error("The page did not report a valid CSS viewport.");
+  }
+  return { width, height };
+};
+
 // Never pass a clip scale: Chromium mirrors the top-left of the page into a `backdrop-filter`
 // in any capture it shrinks.
 export const captureViewport = async (

@@ -314,6 +314,20 @@ describe("server browser snapshot screenshot", () => {
   const colorOf = ([red, green, blue]: readonly [number, number, number, number]) =>
     blue - red > 100 ? "blue" : red - blue > 100 ? "red" : `rgb(${red}, ${green}, ${blue})`;
 
+  it("reads CSS dimensions without a Playwright viewport or trusting page overrides", async () => {
+    await context.close();
+    context = await browser.newContext({ viewport: null });
+    const page = await context.newPage();
+    expect(page.viewportSize()).toBeNull();
+    const expected = await page.evaluate("({ width: innerWidth, height: innerHeight })");
+    await page.evaluate(`Object.defineProperties(window, {
+      innerWidth: { value: 1 }, innerHeight: { value: 1 }, devicePixelRatio: { value: 99 }
+    })`);
+    expect(await ServerBrowserPage.cssViewport(await context.newCDPSession(page))).toEqual(
+      expected,
+    );
+  });
+
   it("captures a blurred backdrop-filter page as rendered, not mirrored", async () => {
     const { screenshot, pixels } = await screenshotOf(halves("backdrop-filter: blur(4px);"));
 
