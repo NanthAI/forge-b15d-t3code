@@ -175,6 +175,17 @@ describe("server browser element refs", () => {
     expect(cut.slice(-8)).toBe("xxx•••••");
   });
 
+  it.each([
+    "data:text/html;charset=utf-8,%3Cp%3EPAGE_CONTENT%3C/p%3E",
+    "data:text/html;base64,PHA+UEFHRV9DT05URU5UPC9wPg==",
+  ])("redacts the snapshot URL of a data: page (%s)", async (url) => {
+    await page.goto(url);
+    const result = await takeSnapshot();
+    expect(result.url).toBe("data:text/html,…");
+    expect(result.visibleText).toBe("PAGE_CONTENT");
+    expect(page.url()).toBe(url);
+  });
+
   it("shows a data: link or blocked data: navigation by media type only", async () => {
     // Chromium keeps raw spaces and quotes in both, so a payload can't be cut at either.
     await page.setContent(`
