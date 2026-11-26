@@ -508,6 +508,62 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([false, true])(
+  "data page URLs are redacted in load reports and status (desktop: %s)",
+  (desktop) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = desktop;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const page = desktop ? desktopConnections[0]!.context.page : contexts[0]!.page;
+        const url = `data:text/html;charset=utf-8,${"<p>page contents</p>".repeat(200)}`;
+        const request = { url: () => url, isNavigationRequest: () => true, frame: () => page };
+        page.emit("request", request);
+        expect(yield* PubSub.take(events)).toMatchObject({
+          type: "navigated",
+          snapshot: { navStatus: { _tag: "Loading", url: "data:text/html,…" } },
+        });
+
+        yield* Effect.promise(() => page.goto(url));
+        expect(yield* PubSub.take(events)).toMatchObject({
+          type: "navigated",
+          snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+        });
+        expect(
+          (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0],
+        ).toMatchObject({
+          navStatus: { url: "data:text/html,…" },
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.url).toBe("data:text/html,…");
+        expect(status.tabs).toContainEqual(
+          expect.objectContaining({ tabId, url: "data:text/html,…" }),
+        );
+        expect(page.url()).toBe(url);
+
+        const blank = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        expect(blank.url).toBeNull();
+        expect(blank.tabs).toContainEqual(
+          expect.objectContaining({ tabId, url: "data:text/html,…" }),
+        );
+        expect(blank.tabs).toContainEqual(
+          expect.objectContaining({ tabId: blank.tabId, url: null }),
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
