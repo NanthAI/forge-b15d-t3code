@@ -537,6 +537,41 @@ it.live("a desktop page that loaded before the server attached reports its loade
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("redacts a desktop data: page in load reports and preview status", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      yield* Effect.promise(() => page.goto('data:text/html;charset="a,b",<p>PAGE_CONTENT</p>'));
+      const loaded = yield* Stream.fromSubscription(events).pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "navigated" &&
+            event.tabId === tabId &&
+            event.snapshot.navStatus._tag === "Success",
+        ),
+        Stream.runHead,
+        Effect.map(Option.getOrThrow),
+      );
+      expect(loaded).toMatchObject({
+        snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+      expect(JSON.stringify(status)).not.toContain("PAGE_CONTENT");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
