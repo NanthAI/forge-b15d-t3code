@@ -12,6 +12,7 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
 import * as ForgejoCli from "./ForgejoCli.ts";
@@ -1403,6 +1404,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.spawnCwd, "/home/forgejo-test");
             assert.deepStrictEqual(input.args, [
               "--host",
               input.cwd === "/no-remotes"
@@ -1415,6 +1417,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
         },
       }),
     ),
+    Effect.provideService(HostProcess.HomeDirectory, "/home/forgejo-test"),
   );
 });
 
@@ -1675,11 +1678,16 @@ it.effect(
                 process: {
                   run: (input) => {
                     commands.push(`${input.command} ${input.args.join(" ")}`);
-                    if (input.command === "git")
+                    if (input.command === "git") {
+                      assert.strictEqual(input.cwd, "/repo");
+                      assert.strictEqual(input.spawnCwd, undefined);
                       return Effect.succeed(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
+                    }
                     if (input.command === "fj") {
+                      assert.strictEqual(input.cwd, "/repo");
+                      assert.strictEqual(input.spawnCwd, "/home/forgejo-test");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
@@ -1727,6 +1735,7 @@ it.effect(
               }),
             ),
           ),
+          Effect.provideService(HostProcess.HomeDirectory, "/home/forgejo-test"),
         );
       }
     }),
