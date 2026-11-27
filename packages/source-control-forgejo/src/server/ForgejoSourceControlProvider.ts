@@ -1,4 +1,5 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
@@ -93,9 +94,12 @@ export const makeDiscovery = Effect.gen(function* () {
         (remote && ForgejoCli.matchForgejoLogin(logins, remote)) ||
         logins.find((entry) => entry.default === "true") ||
         logins[0];
+      const home = yield* HostProcess.HomeDirectory;
       const fj = yield* probeSourceControlProvider({
         cwd,
-        process,
+        process: {
+          run: (input) => process.run({ ...input, spawnCwd: home }),
+        },
         spec: {
           ...discovery,
           executable: "fj",
