@@ -1,7 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { type PreviewEvent, ThreadId } from "@t3tools/contracts";
+import { type PreviewEvent, type PreviewNavStatus, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -77,6 +77,45 @@ it.layer(layer)("PreviewManager", (it) => {
       const listed = yield* manager.list({ threadId });
       expect(listed.sessions.find((s) => s.tabId === opened.tabId)?.profileId).toBe("work");
     }),
+  );
+
+  it.effect.each([
+    { _tag: "Idle" },
+    { _tag: "Loading", url: "data:text/html;charset=private,PAYLOAD", title: "Page" },
+    { _tag: "Success", url: "data:text/html;base64,UEFZTE9BRA==", title: "Page" },
+    {
+      _tag: "LoadFailed",
+      url: "data:text/html,PAYLOAD",
+      title: "Page",
+      code: -2,
+      description: "Failed",
+    },
+  ] satisfies ReadonlyArray<PreviewNavStatus>)(
+    "redacts data: URLs in $_tag status reports and events",
+    (navStatus) =>
+      Effect.gen(function* () {
+        const threadId = freshThreadId();
+        const manager = yield* PreviewManager.PreviewManager;
+        const opened = yield* manager.open({ threadId });
+        const collector = yield* collectEvents;
+        yield* manager.reportStatus({
+          threadId,
+          tabId: opened.tabId,
+          navStatus,
+          canGoBack: true,
+          canGoForward: false,
+        });
+        const expected =
+          navStatus._tag === "Idle" ? navStatus : { ...navStatus, url: "data:text/html,…" };
+        expect((yield* manager.list({ threadId })).sessions[0]?.navStatus).toEqual(expected);
+        const events = yield* collector.drain;
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject(
+          expected._tag === "LoadFailed"
+            ? { type: "failed", url: expected.url }
+            : { type: "navigated", snapshot: { navStatus: expected } },
+        );
+      }),
   );
 
   it.effect("reissues presentation requests without replaying them on navigation", () =>
