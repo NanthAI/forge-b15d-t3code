@@ -176,6 +176,10 @@ describe("server browser element refs", () => {
   });
 
   it("shows a data: link or blocked data: navigation by media type only", async () => {
+    await page.goto("data:text/html;charset=utf-8,<p>PAGE_PAYLOAD</p>");
+    const snapshot = await takeSnapshot();
+    expect(snapshot.url).toBe("data:text/html,…");
+    expect(snapshot.visibleText).toBe("PAGE_PAYLOAD");
     // Chromium keeps raw spaces and quotes in both, so a payload can't be cut at either.
     await page.setContent(`
       <a download href="data:text/plain;charset=&quot;a,b&quot;,head PAYLOAD'tail">Key</a>
