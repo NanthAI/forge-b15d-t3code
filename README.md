@@ -155,4 +155,5 @@ Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 - overlapTask7: packages/source-control-gitcafe
 - overlapTask6: infra/relay
 - overlapTask4: apps/desktop
+- overlapTask8: packages/provider-cursor
 - overlapTask3: packages/source-control-forgejo
