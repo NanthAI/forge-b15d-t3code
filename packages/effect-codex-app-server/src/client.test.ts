@@ -7,7 +7,7 @@ import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it as test } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
 
@@ -16,7 +16,7 @@ const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
 );
 const mockPeerArgs = (path: string) => [path];
 
-it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
+test.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
   const makeHandle = (env?: Record<string, string>) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -154,5 +154,31 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
 
       assert.equal(initialized.userAgent, "mock-codex-app-server");
     }),
+  );
+
+  test.live("includes the launcher error when the child exits before initialize", () =>
+    Effect.gen(function* () {
+      const launchError =
+        "Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest";
+      const handle = yield* makeHandle({ CODEX_APP_SERVER_TEST_LAUNCH_ERROR: launchError });
+      const error = yield* Effect.gen(function* () {
+        const client = yield* CodexClient.CodexAppServerClient;
+        return yield* client.request("initialize", {
+          clientInfo: { name: "test", title: "Test", version: "0.0.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+        });
+      }).pipe(Effect.provide(CodexClient.layerChildProcess(handle)), Effect.flip);
+
+      assert.equal(error._tag, "CodexAppServerProcessExitedError");
+      if (error._tag !== "CodexAppServerProcessExitedError") {
+        assert.fail(`Unexpected error: ${error._tag}`);
+      }
+      assert.equal(error.code, 1);
+      assert.equal(error.stderr, `Error: ${launchError}`);
+      assert.equal(
+        error.message,
+        `Codex App Server process exited with code 1: Error: ${launchError}`,
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
