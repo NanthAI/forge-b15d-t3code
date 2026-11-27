@@ -56,6 +56,26 @@ describe("server browser element refs", () => {
   };
   const repeatedRows = `<ul>${Array.from({ length: 5 }, (_, i) => `<li>row ${i + 1}<button data-testid="delete-row" onclick="this.parentElement.remove()">delete</button></li>`).join("")}</ul>`;
 
+  it("reads CSS dimensions from a desktop page without a Playwright viewport", async () => {
+    await context.close();
+    context = await browser.newContext({ viewport: null });
+    page = await context.newPage();
+    cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 960,
+      height: 540,
+      deviceScaleFactor: 2,
+      mobile: false,
+    });
+    await page.setContent("<input><div style='height:2000px'>Desktop page</div>");
+    await page.evaluate(() => {
+      Object.defineProperty(globalThis, "innerWidth", { value: 1 });
+      Object.defineProperty(globalThis, "innerHeight", { value: 1 });
+    });
+    expect(page.viewportSize()).toBeNull();
+    expect(await ServerBrowserPage.cssViewport(cdp)).toEqual({ width: 960, height: 540 });
+  });
+
   it("clicks the fifth repeated delete control without touching row one", async () => {
     await page.setContent(repeatedRows);
     const result = await takeSnapshot();
