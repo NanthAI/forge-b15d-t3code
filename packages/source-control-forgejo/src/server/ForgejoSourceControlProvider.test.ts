@@ -1,4 +1,5 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -1352,6 +1353,7 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
     assert.strictEqual(httpViewer.stdout, '{"login":"maria"}');
     assert.strictEqual(requests.at(-1), "http://forgejo.local:3000/api/v1/user");
   }).pipe(
+    Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
     Effect.provideService(
       FileSystem.FileSystem,
       FileSystem.makeNoop({
@@ -1403,6 +1405,8 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     ),
               );
             assert.strictEqual(input.command, "fj");
+            assert.strictEqual(input.spawnCwd, "/home/test");
+            assert.oneOf(input.cwd, ["/repo", "/no-remotes"]);
             assert.deepStrictEqual(input.args, [
               "--host",
               input.cwd === "/no-remotes"
@@ -1636,6 +1640,7 @@ it.effect(
           );
           assert.include(commands, "fj version");
         }).pipe(
+          Effect.provideService(HostProcess.HomeDirectory, "/home/test"),
           Effect.provide(
             Layer.mergeAll(
               Layer.mock(ForgejoCli.ForgejoCli)({
@@ -1680,6 +1685,8 @@ it.effect(
                         processOutput("http://forgejo.local:3000/maria/project.git\n"),
                       );
                     if (input.command === "fj") {
+                      assert.strictEqual(input.spawnCwd, "/home/test");
+                      assert.strictEqual(input.cwd, "/repo");
                       if (scenario === "missing")
                         return Effect.fail(
                           new VcsProcessSpawnError({
