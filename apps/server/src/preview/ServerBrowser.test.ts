@@ -398,6 +398,36 @@ beforeEach(() => {
   desktopConnections.length = 0;
 });
 
+it.live.each([false, true])(
+  "redacts data page URLs in load reports and automation status (desktop: %s)",
+  (desktop) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = desktop;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const page = desktop ? desktopConnections[0]!.context.page : contexts[0]!.page;
+        yield* Effect.promise(() =>
+          page.goto(`data:text/html;charset=${"x".repeat(2100)},<p>PAYLOAD</p>`),
+        );
+        const reported = yield* PubSub.take(events);
+        expect(reported).toMatchObject({
+          type: "navigated",
+          snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.url).toBe("data:text/html,…");
+        expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("tells the desktop once per thread when its agent turns start and end", () =>
   Effect.gen(function* () {
     yield* ServerBrowser.ServerBrowser;

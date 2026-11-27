@@ -56,6 +56,15 @@ describe("server browser element refs", () => {
   };
   const repeatedRows = `<ul>${Array.from({ length: 5 }, (_, i) => `<li>row ${i + 1}<button data-testid="delete-row" onclick="this.parentElement.remove()">delete</button></li>`).join("")}</ul>`;
 
+  it("redacts a data page URL while preserving its visible text", async () => {
+    await page.goto(
+      'data:text/html;charset=utf-8,<p>PAYLOAD</p><input type="password" value="data">',
+    );
+    const result = await takeSnapshot();
+    expect(result.url).toBe("data:text/html,…");
+    expect(result.visibleText).toBe("PAYLOAD");
+  });
+
   it("clicks the fifth repeated delete control without touching row one", async () => {
     await page.setContent(repeatedRows);
     const result = await takeSnapshot();
