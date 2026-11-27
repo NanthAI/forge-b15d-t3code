@@ -169,6 +169,7 @@ interface FakePi {
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
+  readonly queueClearQueueResponse: (response: PiRpcRecord) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -197,6 +198,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
+  const clearQueueResponses: Array<PiRpcRecord> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -271,6 +273,11 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
+      case "clear_queue":
+        return {
+          ...base,
+          ...(clearQueueResponses.shift() ?? { data: { steering: [], followUp: [] } }),
+        };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       default:
@@ -346,6 +353,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     takeRequest,
     queueEntries: (data) => entriesQueue.push(data),
     queueMessages: (data) => messagesQueue.push(data),
+    queueClearQueueResponse: (response) => clearQueueResponses.push(response),
     deferNextState: () => {
       deferState = true;
     },
@@ -3951,6 +3959,67 @@ describe("PiAdapterV2", () => {
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    { requestRuntimeRestart: false, supported: true },
+    { requestRuntimeRestart: true, supported: true },
+    { requestRuntimeRestart: false, supported: false },
+    { requestRuntimeRestart: true, supported: false },
+  ])(
+    "clears Pi's native queue before Stop, restart=$requestRuntimeRestart, supported=$supported",
+    ({ requestRuntimeRestart, supported }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        const running = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        assert.isTrue(running.type === "provider_turn.updated");
+        if (running.type !== "provider_turn.updated") return;
+        fake.queueClearQueueResponse(
+          supported
+            ? { data: { steering: ["Use the small model", "  "], followUp: ["Then summarize"] } }
+            : { success: false, error: "Unknown command: clear_queue" },
+        );
+        yield* runtime.interruptTurn({
+          providerThread,
+          providerTurnId: running.providerTurn.id,
+          requestRuntimeRestart,
+        });
+        const requests = fake.allRequests().map((request) => request["type"]);
+        assert.deepEqual(
+          requests.slice(requests.indexOf("prompt") + 1, requests.indexOf("abort") + 1),
+          ["clear_queue", "abort"],
+        );
+        if (!requestRuntimeRestart) yield* fake.emit({ type: "agent_settled" });
+        const notices: Array<string> = [];
+        const terminal = yield* takeEvent((event) => {
+          if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+            assert.equal(event.turnItem.providerTurnId, running.providerTurn.id);
+            notices.push(event.turnItem.message);
+          }
+          return event.type === "turn.terminal";
+        });
+        assert.deepEqual(
+          notices,
+          supported
+            ? [
+                "Stopped before Pi read 3 queued messages:\n\n- Use the small model\n- Then summarize",
+              ]
+            : [],
+        );
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("stops active retry progress when the turn is interrupted", () =>
