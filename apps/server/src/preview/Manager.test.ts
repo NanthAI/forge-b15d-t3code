@@ -79,6 +79,48 @@ it.layer(layer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect.each(["Loading", "Success", "LoadFailed"] as const)(
+    "redacts data: URLs in desktop %s reports before storing or publishing them",
+    (tag) =>
+      Effect.gen(function* () {
+        const threadId = freshThreadId();
+        const manager = yield* PreviewManager.PreviewManager;
+        const opened = yield* manager.open({ threadId, runtime: "desktop" });
+        const collector = yield* collectEvents;
+        const page = {
+          url: 'data:text/html;charset="private,value",<p>PRIVATE PAGE</p>',
+          title: "Page",
+        };
+        const navStatus =
+          tag === "LoadFailed"
+            ? { ...page, _tag: tag, code: -3, description: "Aborted" }
+            : { ...page, _tag: tag };
+
+        yield* manager.reportStatus({
+          threadId,
+          tabId: opened.tabId,
+          navStatus,
+          canGoBack: true,
+          canGoForward: false,
+        });
+
+        const redacted = { ...navStatus, url: "data:text/html,…" };
+        expect((yield* manager.list({ threadId })).sessions[0]).toMatchObject({
+          navStatus: redacted,
+          canGoBack: true,
+          canGoForward: false,
+        });
+        const events = yield* collector.drain;
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject(
+          tag === "LoadFailed"
+            ? { type: "failed", url: redacted.url, code: -3, description: "Aborted" }
+            : { type: "navigated", snapshot: { navStatus: redacted } },
+        );
+        expect(JSON.stringify(events)).not.toContain("PRIVATE");
+      }),
+  );
+
   it.effect("reissues presentation requests without replaying them on navigation", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
