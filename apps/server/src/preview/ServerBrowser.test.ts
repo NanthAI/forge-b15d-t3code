@@ -1632,6 +1632,48 @@ it.live("agents read a human's tab with no arguments and act on it only while no
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([
+  { url: "data:text/html,<p>PRIVATE PAGE</p>", expected: "data:text/html,…" },
+  {
+    url: 'data:text/html;charset="PRIVATE PARAMETER",<p>PRIVATE PAGE</p>',
+    expected: "data:text/html,…",
+  },
+  { url: "data:text/html;base64,PHA+UFJJVkFURSBQQUdFPC9wPg==", expected: "data:text/html,…" },
+  { url: "data:,PRIVATE PAGE", expected: "data:,…" },
+  { url: "https://example.com/data:report,2026", expected: "https://example.com/data:report,2026" },
+])("reports a desktop page URL without its data payload ($url)", ({ url, expected }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      desktopRendersNext = true;
+      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      yield* Effect.promise(() => desktopConnections[0]!.context.page.goto(url));
+      const loaded = yield* PubSub.take(events);
+      expect(loaded).toMatchObject({
+        type: "navigated",
+        snapshot: { navStatus: { _tag: "Success", url: expected } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(desktopTab.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe(expected);
+      expect(status.tabs).toEqual([
+        expect.objectContaining({ tabId, url: null }),
+        expect.objectContaining({ tabId: desktopTab.tabId, url: expected }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("a session's own tab stays its default while other sessions' tabs are listed", () =>
   Effect.scoped(
     Effect.gen(function* () {
