@@ -152,4 +152,5 @@ Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg
 Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 - overlapTask2: evals
 - overlapTask8: packages/provider-cursor
+- overlapTask5: oxlint-plugin-t3code
 - overlapTask7: packages/source-control-gitcafe
