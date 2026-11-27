@@ -58,6 +58,19 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
+      context.page.viewportSize = () => null;
+      if (desktopMetricsRead) {
+        const read = desktopMetricsRead;
+        const newCDPSession = context.newCDPSession;
+        context.newCDPSession = async (target) => {
+          const session = await newCDPSession(target);
+          const send = session.send.getMockImplementation()!;
+          session.send.mockImplementation((method, input) =>
+            method === "Page.getLayoutMetrics" ? read() : send(method, input),
+          );
+          return session;
+        };
+      }
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -89,11 +102,15 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
   const events = new NodeEvents.EventEmitter();
   return {
     on: vi.fn((name: string, listener: () => void) => events.on(name, listener)),
-    emit: (name: string) => events.emit(name),
+    emit: (name: string, ...args: unknown[]) => events.emit(name, ...args),
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
-      if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 0 } };
+      if (method === "Page.getLayoutMetrics")
+        return {
+          cssVisualViewport: { pageX: 0, pageY: 0 },
+          cssLayoutViewport: { clientWidth: 1280, clientHeight: 800 },
+        };
       if (method === "Page.captureScreenshot") {
         // A snapshot sizes its screenshot from the PNG header; viewers get JPEG frames as-is.
         return { data: (input as { format: string }).format === "png" ? PNG_HEADER : "ZnJhbWU=" };
@@ -173,7 +190,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     frames: () => [page],
     url: () => url,
     title: vi.fn(async () => "test page"),
-    viewportSize: () => viewport,
+    viewportSize: (): { width: number; height: number } | null => viewport,
     setViewportSize: vi.fn(async (size: typeof viewport) => {
       viewport = size;
     }),
@@ -282,6 +299,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopMetricsRead: (() => Promise<Record<string, unknown>>) | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -394,6 +412,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopMetricsRead = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -504,6 +523,233 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "desktop viewers receive CSS dimensions and can tap, type, scroll, and reconnect behind a backlog",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker } = yield* ready;
+        desktopRendersNext = true;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        const tabId = opened.tabId!;
+        expect(opened.viewport).toEqual({ width: 1280, height: 800 });
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        expect(yield* Queue.takeAll(viewer.output)).toContainEqual({
+          _tag: "viewport",
+          width: 1280,
+          height: 800,
+        });
+        yield* viewer.input({ type: "takeControl" });
+        yield* viewer.input({
+          type: "mouse",
+          action: "down",
+          x: 100,
+          y: 200,
+          button: "left",
+          buttons: 1,
+        });
+        yield* viewer.input({
+          type: "mouse",
+          action: "up",
+          x: 100,
+          y: 200,
+          button: "left",
+          buttons: 0,
+        });
+        yield* viewer.input({ type: "text", text: "phone typing" });
+        yield* viewer.input({ type: "wheel", x: 100, y: 200, deltaY: 300 });
+        const context = desktopConnections[0]!.context;
+        const session = context.sessions.at(-1)!;
+        expect(session.send).toHaveBeenCalledWith(
+          "Input.dispatchMouseEvent",
+          expect.objectContaining({ type: "mousePressed", x: 100, y: 200 }),
+        );
+        expect(session.send).toHaveBeenCalledWith("Input.insertText", { text: "phone typing" });
+        expect(session.send).toHaveBeenCalledWith(
+          "Input.dispatchMouseEvent",
+          expect.objectContaining({ type: "mouseWheel", deltaY: 300 }),
+        );
+        const metrics = context.sessions[0]!;
+        const send = metrics.send.getMockImplementation()!;
+        metrics.send.mockImplementation((method, input) =>
+          method === "Page.getLayoutMetrics"
+            ? Promise.resolve({ cssLayoutViewport: { clientWidth: 900, clientHeight: 600 } })
+            : send(method, input),
+        );
+        session.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: 1 });
+        let resized = yield* Queue.take(viewer.output);
+        while (resized._tag !== "viewport") {
+          resized = yield* Queue.take(viewer.output);
+        }
+        expect(resized).toEqual({ _tag: "viewport", width: 900, height: 600 });
+        yield* Queue.clear(viewer.output);
+        for (let index = 0; index < 64; index++)
+          yield* viewer.input({ type: "probe", x: index, y: 0 });
+        desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId });
+        let output = yield* Queue.take(viewer.output);
+        while (output._tag !== "reconnect") {
+          output = yield* Queue.take(viewer.output);
+        }
+        expect(output).toEqual({ _tag: "reconnect" });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("desktop viewport reads keep the last CSS size when reads fail or stall", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker } = yield* ready;
+      desktopRendersNext = true;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const tabId = PreviewTabId.make(opened.tabId!);
+      const context = desktopConnections[0]!.context;
+      const metrics = context.sessions[0]!;
+      const send = metrics.send.getMockImplementation()!;
+      let size: Record<string, unknown> | Error | Promise<Record<string, unknown>> = new Error(
+        "page navigating",
+      );
+      let reading = Promise.withResolvers<void>();
+      metrics.send.mockImplementation((method, input) => {
+        if (method !== "Page.getLayoutMetrics") return send(method, input);
+        reading.resolve();
+        return size instanceof Error ? Promise.reject(size) : Promise.resolve(size);
+      });
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      expect(yield* Queue.takeAll(viewer.output)).toContainEqual({
+        _tag: "viewport",
+        width: 1280,
+        height: 800,
+      });
+      for (const invalid of [
+        new Error("read failed"),
+        { cssLayoutViewport: { clientWidth: 0, clientHeight: 0 } },
+        { cssLayoutViewport: { clientWidth: NaN, clientHeight: 900 } },
+      ]) {
+        size = invalid;
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.viewport).toEqual({ width: 1280, height: 800 });
+      }
+      const pending = Promise.withResolvers<Record<string, unknown>>();
+      size = pending.promise;
+      reading = Promise.withResolvers<void>();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      yield* Effect.addFinalizer(() => Effect.sync(() => vi.useRealTimers()));
+      const stale = yield* broker
+        .invoke<PreviewAutomationStatus>({ scope, tabId, operation: "status", input: {} })
+        .pipe(Effect.forkScoped);
+      yield* Effect.promise(() => reading.promise);
+      yield* Effect.promise(() => vi.advanceTimersByTimeAsync(2_000));
+      expect((yield* Fiber.join(stale)).viewport).toEqual({ width: 1280, height: 800 });
+      size = { cssLayoutViewport: { clientWidth: 960, clientHeight: 540 } };
+      pending.resolve(size);
+      const session = context.sessions.at(-1)!;
+      session.emit("Page.screencastFrame", { data: "ZnJhbWU=", sessionId: 1 });
+      let output = yield* Queue.take(viewer.output);
+      while (output._tag !== "viewport") output = yield* Queue.take(viewer.output);
+      expect(output).toEqual({ _tag: "viewport", width: 960, height: 540 });
+      expect(context.page.setViewportSize).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "a stalled desktop size read is bounded, shared by viewers, and recovers after a dialog",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const started = Promise.withResolvers<void>();
+        const result = Promise.withResolvers<Record<string, unknown>>();
+        let reads = 0;
+        desktopMetricsRead = () => {
+          reads++;
+          started.resolve();
+          return result.promise;
+        };
+        desktopRendersNext = true;
+        const tab = yield* manager.open({ threadId: scope.thread.threadId, runtime: "server" });
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        yield* Effect.addFinalizer(() => Effect.sync(() => vi.useRealTimers()));
+        const attaching = yield* browser
+          .attachViewer(viewerInput(tab.tabId, true))
+          .pipe(Effect.forkScoped);
+        yield* Effect.promise(() => started.promise);
+        const page = desktopConnections[0]!.context.page;
+        const dialog = {
+          type: () => "alert",
+          message: () => "Paused",
+          defaultValue: () => "",
+          accept: async () => {
+            result.resolve({ cssLayoutViewport: { clientWidth: 900, clientHeight: 600 } });
+          },
+          dismiss: async () => {},
+        };
+        page.emit("dialog", dialog);
+        yield* Effect.promise(() => vi.advanceTimersByTimeAsync(2_000));
+        const viewer = yield* Fiber.join(attaching);
+        const observer = yield* browser.attachViewer(viewerInput(tab.tabId, false));
+        expect(reads).toBe(1);
+        expect(yield* Queue.takeAll(viewer.output)).toContainEqual(
+          expect.objectContaining({
+            _tag: "control",
+            controller: "you",
+            dialog: expect.objectContaining({ type: "alert" }),
+          }),
+        );
+        yield* viewer.input({ type: "dialog", accept: true });
+        for (const current of [viewer, observer]) {
+          let output = yield* Queue.take(current.output);
+          while (output._tag !== "viewport") output = yield* Queue.take(current.output);
+          expect(output).toEqual({ _tag: "viewport", width: 900, height: 600 });
+        }
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make(tab.tabId),
+          operation: "status",
+          input: {},
+        });
+        expect(status.viewport).toEqual({ width: 900, height: 600 });
+        expect(status.dialog).toBeNull();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("preserves viewport and control messages when a viewer's output queue is full", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* viewer.input({ type: "takeControl" });
+      yield* Queue.clear(viewer.output);
+      for (let index = 0; index < 64; index++)
+        yield* viewer.input({ type: "probe", x: index, y: 0 });
+      yield* viewer.input({ type: "resize", width: 390, height: 844 });
+      for (let index = 0; index < 64; index++)
+        yield* viewer.input({ type: "probe", x: index, y: 0 });
+      yield* viewer.input({ type: "releaseControl" });
+      const output = yield* Queue.clear(viewer.output);
+      expect(output).toContainEqual({ _tag: "viewport", width: 390, height: 844 });
+      expect(output).toContainEqual(
+        expect.objectContaining({ _tag: "control", controller: "agent" }),
+      );
     }),
   ).pipe(Effect.provide(layer)),
 );
