@@ -509,6 +509,54 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 );
 
 it.live.each([
+  { name: "inline", url: "data:text/html,<p>private page contents</p>" },
+  {
+    name: "long parameters and base64",
+    url: `data:text/html;private=${"x".repeat(2100)};base64,PHA+cHJpdmF0ZTwvcD4=`,
+  },
+])("data pages keep only their media type in load reports and status: $name", ({ url }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      desktopRendersNext = true;
+      const desktop = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const events = yield* manager.subscribeEvents;
+      yield* Effect.promise(() => desktopConnections[0]!.context.page.goto(url));
+      let loaded = yield* PubSub.take(events);
+      while (loaded.type !== "navigated" || loaded.snapshot.navStatus._tag !== "Success") {
+        loaded = yield* PubSub.take(events);
+      }
+      expect(loaded.snapshot.navStatus).toMatchObject({
+        _tag: "Success",
+        url: "data:text/html,…",
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: PreviewTabId.make(desktop.tabId!),
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe("data:text/html,…");
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(other.url).toBeNull();
+      expect(other.tabs).toContainEqual(
+        expect.objectContaining({ tabId: desktop.tabId, url: "data:text/html,…" }),
+      );
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
   { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
   { method: "goBack" as const, message: { type: "history", delta: -1 } },
   { method: "goForward" as const, message: { type: "history", delta: 1 } },
