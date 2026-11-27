@@ -842,6 +842,58 @@ it.live("reports a pending dialog without evaluating the page and resolves it ex
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([
+  {
+    name: "HTTP",
+    url: "https://example.com/data:report,2026",
+    expected: "https://example.com/data:report,2026",
+  },
+  {
+    name: "HTML",
+    url: 'data:text/html;charset="a,b",<p>PRIVATE PAGE</p>',
+    expected: "data:text/html,…",
+  },
+  {
+    name: "long parameters",
+    url: `data:text/plain;${"PRIVATE".repeat(400)},payload`,
+    expected: "data:text/plain,…",
+  },
+  { name: "no media type", url: "data:;base64,UFRJVkFURQ==", expected: "data:,…" },
+])("reports a desktop page URL without its data payload ($name)", ({ url, expected }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const page = desktopConnections[0]!.context.page;
+      yield* Effect.promise(() => page.goto(url));
+      expect(yield* PubSub.take(events)).toMatchObject({
+        type: "navigated",
+        snapshot: { navStatus: { _tag: "Success", url: expected } },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.url).toBe(expected);
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: expected })]);
+      const other = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      expect(other.url).toBeNull();
+      expect(other.tabs).toEqual([
+        expect.objectContaining({ tabId, url: expected }),
+        expect.objectContaining({ tabId: other.tabId, url: null }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("a tab opened to a file the browser cannot show reports the file to download", () =>
   Effect.scoped(
     Effect.gen(function* () {
