@@ -1,3 +1,5 @@
+import { stripVTControlCharacters } from "node:util";
+
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
@@ -49,15 +51,57 @@ type ChildProcessTerminationHandle = Pick<
   "exitCode" | "pid"
 >;
 
+export const makeStderrTail = () => {
+  const limit = 8 * 1024;
+  let tail = new Uint8Array();
+  return {
+    append(chunk: Uint8Array) {
+      if (chunk.length >= limit) {
+        tail = new Uint8Array(chunk.subarray(-limit));
+        return;
+      }
+      const kept = tail.subarray(Math.max(0, tail.length + chunk.length - limit));
+      const next = new Uint8Array(kept.length + chunk.length);
+      next.set(kept);
+      next.set(chunk, kept.length);
+      tail = next;
+    },
+    get() {
+      const lines = stripVTControlCharacters(new TextDecoder().decode(tail))
+        .split(/[\r\n]+/)
+        .map((line) => line.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      // Node launchers surround the thrown error with a source excerpt and stack frames.
+      const line =
+        lines.findLast((line) => /^(?:\w*Error(?: \[ERR_[^\]]+\])?|error|fatal):/.test(line)) ??
+        lines.at(-1);
+      return line?.slice(0, 512);
+    },
+  };
+};
+
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
+  stderr?: { readonly done: Effect.Effect<void>; readonly get: () => string | undefined },
 ): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
+  Effect.matchEffect(handle.exitCode, {
     onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
+      Effect.succeed(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-process-exit-status",
+          pid: handle.pid,
+          cause,
+        }),
+      ),
+    onSuccess: Effect.fn("CodexAppServerClient.makeTerminationError")(function* (code) {
+      if (stderr) {
+        yield* stderr.done.pipe(Effect.timeoutOption("250 millis"));
+      }
+      const excerpt = stderr?.get();
+      return new CodexError.CodexAppServerProcessExitedError({
+        code,
         pid: handle.pid,
-        cause,
-      }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
+        ...(excerpt === undefined ? {} : { stderr: excerpt }),
+      });
+    }),
   });
