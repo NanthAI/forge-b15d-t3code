@@ -97,6 +97,7 @@ const SCREENCAST_MOTION_QUALITY = 50;
 const HOST_RECONNECT_DELAY = "1 second";
 const DESKTOP_ATTACH_TIMEOUT = "10 seconds";
 const VIEWER_OUTPUT_LIMIT = 64;
+const LAYOUT_READ_TIMEOUT = "2 seconds";
 const RECORDING_SCREENCAST = { format: "jpeg", quality: 90, everyNthFrame: 1 } as const;
 const decodeViewportSetting = Schema.decodeUnknownSync(PreviewViewportSettingSchema);
 const AGENT_CURSOR_MOVE_MS = 160;
@@ -296,6 +297,8 @@ interface ServerTab {
   readonly isolatedContext: boolean;
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
+  desktopSize: { width: number; height: number } | null;
+  desktopSizeRead: Promise<void> | null;
   readonly profileId: string | undefined;
   readonly openerTabId: string | undefined;
 
@@ -597,8 +600,9 @@ const make = Effect.gen(function* () {
   };
 
   const layoutSize = (tab: ServerTab) => {
+    if (tab.desktop) return tab.desktopSize;
     const size = tab.page.viewportSize();
-    if (!size || tab.desktop) return size;
+    if (!size) return size;
     return {
       width: Math.max(1, Math.round(size.width / tab.zoomFactor)),
       height: Math.max(1, Math.round(size.height / tab.zoomFactor)),
@@ -626,6 +630,30 @@ const make = Effect.gen(function* () {
     const size = layoutSize(tab);
     if (!size) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
+  };
+
+  const readLayoutSize = async (tab: ServerTab) => {
+    if (!tab.desktop) return layoutSize(tab);
+    // A timed-out page read still runs. Share it until it settles, including across viewers.
+    if (tab.desktopSizeRead === null) {
+      tab.desktopSizeRead = tab.page
+        .evaluate<{ width: number; height: number }>("({ width: innerWidth, height: innerHeight })")
+        .then(({ width, height }) => {
+          if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0)
+            return;
+          if (tab.closing) return;
+          const previous = tab.desktopSize;
+          tab.desktopSize = { width, height };
+          if (previous?.width !== width || previous.height !== height) broadcastViewport(tab);
+        })
+        .catch(constVoid)
+        .finally(() => {
+          tab.desktopSizeRead = null;
+        });
+    }
+    const pending = tab.desktopSizeRead;
+    await runPromise(Effect.promise(() => pending).pipe(Effect.timeoutOption(LAYOUT_READ_TIMEOUT)));
+    return tab.desktopSize;
   };
 
   const applySetting = async (tab: ServerTab, setting: PreviewViewportSetting) => {
@@ -777,6 +805,8 @@ const make = Effect.gen(function* () {
       },
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
+      desktopSize: null,
+      desktopSizeRead: null,
       profileId: snapshot.profileId,
       openerTabId: adopted?.openerTabId,
       downloads: [],
@@ -1483,7 +1513,7 @@ const make = Effect.gen(function* () {
       };
     }
     const url = tab.page.url();
-    const viewport = tab.page.viewportSize();
+    const viewport = tab.desktop ? await readLayoutSize(tab) : tab.page.viewportSize();
     const status = {
       available: true,
       visible: tab.viewers.size > 0,
@@ -2412,12 +2442,23 @@ const make = Effect.gen(function* () {
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss replaces its backlog. It runs
         // synchronously so an older replacement can never land after a newer one.
-        else if (next._tag === "gone" || next._tag === "control" || next._tag === "fileChooser") {
+        else if (
+          next._tag === "gone" ||
+          next._tag === "reconnect" ||
+          next._tag === "viewport" ||
+          next._tag === "control" ||
+          next._tag === "fileChooser"
+        ) {
           const dropped = Effect.runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
+          for (const tag of ["viewport", "control"] as const) {
+            const latest = dropped.value.findLast((item) => item._tag === tag);
+            if (latest && next._tag !== tag) Queue.offerUnsafe(output, latest);
+          }
           Queue.offerUnsafe(output, next);
 
-          const chooser = next._tag === "control" ? fileChooserMessage(tab) : null;
+          const chooser =
+            next._tag === "control" || next._tag === "viewport" ? fileChooserMessage(tab) : null;
           if (chooser && tab.control.controller === viewer.id) Queue.offerUnsafe(output, chooser);
           for (const item of dropped.value) if (item._tag === "frame") runFork(item.ack);
         }
@@ -2464,6 +2505,7 @@ const make = Effect.gen(function* () {
     );
     let screencastStarted = false;
     session.on("Page.screencastFrame", (frame) => {
+      if (tab.desktop && tab.desktopSizeRead === null) void readLayoutSize(tab);
       screencastStarted = true;
       if (framesInFlight > 0) mayHaveDropped = true;
       framesInFlight += 1;
@@ -2507,6 +2549,7 @@ const make = Effect.gen(function* () {
         ),
       });
     });
+    yield* Effect.promise(() => readLayoutSize(tab));
     broadcastViewport(tab);
     yield* Effect.promise(() => startScreencast(1));
     // An idle page does not repaint for a new screencast, so the viewer
