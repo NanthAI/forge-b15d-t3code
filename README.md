@@ -151,4 +151,5 @@ Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg
 
 Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 - overlapTask1: packages/provider-core
+- overlapTask5: oxlint-plugin-t3code
 - overlapTask8: packages/provider-cursor
