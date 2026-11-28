@@ -1212,6 +1212,52 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
+      const emitSystemNotice = Effect.fn("PiAdapter.emitSystemNotice")(function* (
+        turn: ActivePiTurn,
+        message: string,
+      ) {
+        if (message.length === 0) return;
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            completedAt: emittedAt,
+            title: message,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      const clearNativeQueue = Effect.fn("PiAdapter.clearNativeQueue")(function* (
+        turn: ActivePiTurn,
+      ) {
+        // Pi before 0.84.4 rejects clear_queue; clearing must never prevent Stop from aborting.
+        const data = yield* request({ type: "clear_queue" }, 2_000).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        const messages = ["steering", "followUp"].flatMap((key) => {
+          const queued = recordField(data, key);
+          return Array.isArray(queued)
+            ? queued.filter((text): text is string => typeof text === "string")
+            : [];
+        });
+        if (messages.length === 0) return;
+        const listed = messages.filter((text) => text.trim().length > 0);
+        const summary = `Stopped before Pi read ${messages.length} queued message${messages.length === 1 ? "" : "s"}`;
+        yield* emitSystemNotice(
+          turn,
+          listed.length === 0
+            ? `${summary}.`
+            : `${summary}:\n\n${listed.map((text) => `- ${text}`).join("\n")}`,
+        );
+      });
+
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
@@ -1219,23 +1265,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (method === "notify") {
           const state = threadState;
           const turn = state?.activeTurn ?? null;
-          const message = recordString(event, "message") ?? "";
-          if (turn === null || message.length === 0) return;
-          const emittedAt = yield* DateTime.now;
-          const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
-          yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
-          yield* emit({
-            type: "turn_item.updated",
-            driver: PI_PROVIDER,
-            turnItem: {
-              ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
-              status: "completed",
-              completedAt: emittedAt,
-              title: message,
-              type: "system_notice",
-              message,
-            },
-          });
+          if (turn !== null) yield* emitSystemNotice(turn, recordString(event, "message") ?? "");
           return;
         }
         if (
@@ -2641,6 +2671,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               // Generic abort misses manual compaction; terminate so Stop covers /compact and recovery.
               stopRequested = true;
               if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
+                yield* clearNativeQueue(turn);
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
               // Read rollback tree refs before termination breaks requests; the permit lets in-flight capture finish.
@@ -2654,6 +2685,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               );
               return;
             }
+            yield* clearNativeQueue(turn);
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
