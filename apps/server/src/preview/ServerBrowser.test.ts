@@ -58,6 +58,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
+      if (desktopInitialUrl) await context.page.goto(desktopInitialUrl);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -282,6 +283,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopInitialUrl: string | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -394,6 +396,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopInitialUrl = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -418,6 +421,36 @@ it.live("tells the desktop once per thread when its agent turns start and end", 
     expect(yield* Queue.take(turns)).toEqual([threadId, false]);
     expect(yield* Queue.size(turns)).toBe(0);
   }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect.each([false, true])(
+  "redacts data page URLs in load reports and status (desktop: %s)",
+  (desktop) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = desktop;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const page = desktop ? desktopConnections[0]!.context.page : contexts[0]!.page;
+        const url = `data:text/html;charset=utf-8,${"PAGE_CONTENT".repeat(300)}`;
+        yield* Effect.promise(() => page.goto(url));
+        const loaded = yield* PubSub.take(events);
+        expect(loaded).toMatchObject({
+          type: "navigated",
+          snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.url).toBe("data:text/html,…");
+        expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+        expect(page.url()).toBe(url);
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("preview_open reports its navigation timeout instead of the request budget", () =>
@@ -504,6 +537,35 @@ it.effect("a tab the desktop does not draw is marked headless, so the desktop st
 
       expect(headlessOf(tabId)).toBe(true);
       expect(headlessOf(desktopTab.tabId)).toBeUndefined();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("a desktop page that loaded before the server attached reports its loaded title", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopRendersNext = true;
+      desktopInitialUrl = "https://example.com/loaded";
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { url: desktopInitialUrl, reuseExistingTab: false, show: false },
+      });
+
+      let event = yield* PubSub.take(events);
+      while (event.type !== "navigated" || event.tabId !== opened.tabId) {
+        event = yield* PubSub.take(events);
+      }
+
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions.find((session) => session.tabId === opened.tabId)?.navStatus).toEqual({
+        _tag: "Success",
+        url: desktopInitialUrl,
+        title: "test page",
+      });
     }),
   ).pipe(Effect.provide(layer)),
 );
