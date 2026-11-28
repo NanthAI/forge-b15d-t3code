@@ -420,6 +420,30 @@ it.live("tells the desktop once per thread when its agent turns start and end", 
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
+it.live("redacts data page URLs in load reports and status, including the tab list", () =>
+  Effect.gen(function* () {
+    const { broker, tabId } = yield* ready;
+    const manager = yield* Manager.PreviewManager;
+    const events = yield* manager.subscribeEvents;
+    const url = `data:text/html;${"x".repeat(2100)},<p>PAGE_CONTENT</p>`;
+    yield* Effect.promise(() => contexts[0]!.page.goto(url));
+    const loaded = yield* PubSub.take(events);
+    expect(loaded).toMatchObject({
+      type: "navigated",
+      snapshot: { navStatus: { _tag: "Success", url: "data:text/html,…" } },
+    });
+    const status = yield* broker.invoke<PreviewAutomationStatus>({
+      scope,
+      tabId,
+      operation: "status",
+      input: {},
+    });
+    expect(status.url).toBe("data:text/html,…");
+    expect(status.tabs).toEqual([expect.objectContaining({ tabId, url: "data:text/html,…" })]);
+    expect(JSON.stringify(status)).not.toContain("PAGE_CONTENT");
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
 it.live("preview_open reports its navigation timeout instead of the request budget", () =>
   Effect.scoped(
     Effect.gen(function* () {
